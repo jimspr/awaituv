@@ -123,11 +123,6 @@ namespace awaituv
     }
   };
 
-  template <typename state_t, typename req_t>
-  struct awaitable_t : public state_t, public req_t
-  {
-  };
-
   // The awaitable_state class is good enough for most cases, however there are some cases
   // where a libuv callback returns more than one "value".  In that case, the function can
   // define its own state type that holds more information.
@@ -355,24 +350,6 @@ namespace awaituv
     if (ret != 0)
       awaitable.set_value(ret);
     return awaitable;
-  }
-
-  typedef awaitable_t<awaitable_state<uv_file>, fs_t> awaitable_fs_open;
-
-  // return reference to passed in awaitable so that fs_open is directly awaitable
-  template <typename req_t>
-  auto& fs_open(uv_loop_t* loop, awaitable_t<awaitable_state<uv_file>, req_t>* awaitable, const char* path, int flags, int mode)
-  {
-    auto ret = uv_fs_open(loop, awaitable, path, flags, mode,
-      [](uv_fs_t* req) -> void
-    {
-      auto state = static_cast<awaitable_t<awaitable_state<uv_file>, req_t>*>(req);
-      state->set_value(req->result);
-    });
-
-    if (ret != 0)
-      awaitable->set_value(ret);
-    return *awaitable;
   }
 
   auto fs_close(uv_loop_t* loop, uv_fs_t* req, uv_file file)

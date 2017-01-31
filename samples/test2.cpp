@@ -118,10 +118,9 @@ future_t<void> start_dump_file(const std::string& str)
   // We can use the same request object for all file operations as they don't overlap.
   static_buf_t<1024> buffer;
 
-  //fs_t openreq;
-  //awaitable_state<uv_file> state;
-  awaitable_fs_open awaitable;
-  uv_file file = co_await fs_open(uv_default_loop(), &awaitable, str.c_str(), O_RDONLY, 0);
+  fs_t openreq;
+  awaitable_state<uv_file> state;
+  uv_file file = co_await fs_open(state, uv_default_loop(), &openreq, str.c_str(), O_RDONLY, 0);
   if (file > 0)
   {
     while (1)
