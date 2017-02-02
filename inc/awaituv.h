@@ -4,6 +4,7 @@
 #include <memory>
 #include <list>
 #include <string.h>
+#include <atomic>
 
 #ifdef __unix__
 #include <coroutine.h>
@@ -123,6 +124,114 @@ namespace awaituv
     }
   };
 
+  // We need to be able to manage reference count of the state object in the callback.
+  template <typename awaitable_state_t>
+  struct counted_awaitable_state : public awaitable_state_t
+  {
+    std::atomic<int> _count = 0; // tracks reference count of state object
+
+    counted_awaitable_state() = default;
+    counted_awaitable_state(const counted_awaitable_state&) = delete;
+    counted_awaitable_state(counted_awaitable_state&&) = delete;
+
+    counted_awaitable_state* lock()
+    {
+      ++_count;
+      return this;
+    }
+
+    void unlock()
+    {
+      if (--_count == 0)
+        delete this;
+    }
+  protected:
+    ~counted_awaitable_state() {}
+  };
+
+  // counted_ptr is similar to shared_ptr but allows explicit control
+  // 
+  template <typename T>
+  struct counted_ptr
+  {
+    counted_ptr() = default;
+    counted_ptr(const counted_ptr& cp) : _p(cp._p)
+    {
+      _lock();
+    }
+
+    counted_ptr(counted_awaitable_state<T>* p) : _p(p)
+    {
+      _lock();
+    }
+
+    counted_ptr(counted_ptr&& cp)
+    {
+      std::swap(_p, cp._p);
+    }
+
+    counted_ptr& operator=(const counted_ptr& cp)
+    {
+      if (&cp != this)
+      {
+        _unlock();
+        _lock(cp._p);
+      }
+      return *this;
+    }
+
+    counted_ptr& operator=(counted_ptr&& cp)
+    {
+      if (&cp != this)
+        std::swap(_p, cp._p);
+      return *this;
+    }
+
+    ~counted_ptr()
+    {
+      _unlock();
+    }
+
+    counted_awaitable_state<T>* operator->()
+    {
+      return _p;
+    }
+
+    counted_awaitable_state<T>* get()
+    {
+      return _p;
+    }
+
+  protected:
+    void _unlock()
+    {
+      if (_p != nullptr)
+      {
+        auto t = _p;
+        _p = nullptr;
+        t->unlock();
+      }
+    }
+    void _lock(counted_awaitable_state<T>* p)
+    {
+      if (p != nullptr)
+        p->lock();
+      _p = p;
+    }
+    void _lock()
+    {
+      if (_p != nullptr)
+        _p->lock();
+    }
+    counted_awaitable_state<T>* _p = nullptr;
+  };
+
+  template <typename T>
+  counted_ptr<T> make_counted()
+  {
+    return new counted_awaitable_state<T>{};
+  }
+
   // The awaitable_state class is good enough for most cases, however there are some cases
   // where a libuv callback returns more than one "value".  In that case, the function can
   // define its own state type that holds more information.
@@ -133,9 +242,9 @@ namespace awaituv
   struct future_t
   {
     typedef promise_t<T, state_t> promise_type;
-    std::shared_ptr<state_t> _state;
+    counted_ptr<state_t> _state;
 
-    future_t(const std::shared_ptr<state_t>& state) : _state(state)
+    future_t(const counted_ptr<state_t>& state) : _state(state)
     {
       _state->_future_acquired = true;
     }
@@ -174,17 +283,13 @@ namespace awaituv
   struct promise_t
   {
     typedef future_t<T, state_t> future_type;
-    std::shared_ptr<state_t> _state{ std::make_shared<state_t>() };
+    typedef counted_awaitable_state<state_t> state_type;
+    counted_ptr<state_t> _state{ make_counted<state_t>() };
 
     // movable not copyable
     promise_t() = default;
     promise_t(const promise_t&) = delete;
     promise_t(promise_t&&) = default;
-
-    void set_value(const T& value)
-    {
-      _state->set_value(value);
-    }
 
     future_type get_future()
     {
@@ -228,17 +333,13 @@ namespace awaituv
   struct promise_t<void, state_t>
   {
     typedef future_t<void, state_t> future_type;
-    std::shared_ptr<awaitable_state<void>> _state{ std::make_shared<awaitable_state<void>>() };
+    typedef counted_awaitable_state<state_t> state_type;
+    counted_ptr<state_t> _state{ make_counted<state_t>() };
 
     // movable not copyable
     promise_t() = default;
     promise_t(const promise_t&) = delete;
     promise_t(promise_t&&) = default;
-
-    void set_value()
-    {
-      _state->set_value();
-    }
 
     future_type get_future()
     {
@@ -323,16 +424,22 @@ namespace awaituv
   auto fs_open(uv_loop_t* loop, uv_fs_t* req, const char* path, int flags, int mode)
   {
     promise_t<uv_file> awaitable;
-    req->data = awaitable._state.get();
+    auto state = awaitable._state->lock();
+    req->data = state;
 
     auto ret = uv_fs_open(loop, req, path, flags, mode,
       [](uv_fs_t* req) -> void
     {
-      static_cast<awaitable_state<uv_file>*>(req->data)->set_value(req->result);
+      auto state = static_cast<promise_t<uv_file>::state_type*>(req->data);
+      state->set_value(req->result);
+      state->unlock();
     });
 
     if (ret != 0)
-      awaitable.set_value(ret);
+    {
+      state->set_value(ret);
+      state->unlock();
+    }
     return awaitable.get_future();
   }
 
@@ -355,16 +462,22 @@ namespace awaituv
   auto fs_close(uv_loop_t* loop, uv_fs_t* req, uv_file file)
   {
     promise_t<int> awaitable;
-    req->data = awaitable._state.get();
+    auto state = awaitable._state->lock();
+    req->data = state;
 
     auto ret = uv_fs_close(loop, req, file,
       [](uv_fs_t* req) -> void
     {
-      static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
+      auto state = static_cast<promise_t<int>::state_type*>(req->data);
+      state->set_value(req->result);
+      state->unlock();
     });
 
     if (ret != 0)
-      awaitable.set_value(ret);
+    {
+      state->set_value(ret);
+      state->unlock();
+    }
     return awaitable.get_future();
   }
 
@@ -386,16 +499,22 @@ namespace awaituv
   auto fs_write(uv_loop_t* loop, uv_fs_t* req, uv_file file, const uv_buf_t bufs[], unsigned int nbufs, int64_t offset)
   {
     promise_t<int> awaitable;
-    req->data = awaitable._state.get();
+    auto state = awaitable._state->lock();
+    req->data = state;
 
     auto ret = uv_fs_write(loop, req, file, bufs, nbufs, offset,
       [](uv_fs_t* req) -> void
     {
-      static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
+      auto state = static_cast<promise_t<int>::state_type*>(req->data);
+      state->set_value(req->result);
+      state->unlock();
     });
 
     if (ret != 0)
-      awaitable.set_value(ret);
+    {
+      state->set_value(ret);
+      state->unlock();
+    }
     return awaitable.get_future();
   }
 
@@ -417,16 +536,22 @@ namespace awaituv
   auto fs_read(uv_loop_t* loop, uv_fs_t* req, uv_file file, const uv_buf_t bufs[], unsigned int nbufs, int64_t offset)
   {
     promise_t<int> awaitable;
-    req->data = awaitable._state.get();
+    auto state = awaitable._state->lock();
+    req->data = state;
 
     auto ret = uv_fs_read(loop, req, file, bufs, nbufs, offset,
       [](uv_fs_t* req) -> void
     {
-      static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
+      auto state = static_cast<promise_t<int>::state_type*>(req->data);
+      state->set_value(req->result);
+      state->unlock();
     });
 
     if (ret != 0)
-      awaitable.set_value(ret);
+    {
+      state->set_value(ret);
+      state->unlock();
+    }
     return awaitable.get_future();
   }
 
@@ -449,16 +574,22 @@ namespace awaituv
   auto write(::uv_write_t* req, uv_stream_t* handle, const uv_buf_t bufs[], unsigned int nbufs)
   {
     promise_t<int> awaitable;
-    req->data = awaitable._state.get();
+    auto state = awaitable._state->lock();
+    req->data = state;
 
     auto ret = uv_write(req, handle, bufs, nbufs,
       [](uv_write_t* req, int status) -> void
     {
-      static_cast<awaitable_state<int>*>(req->data)->set_value(status);
+      auto state = static_cast<promise_t<int>::state_type*>(req->data);
+      state->set_value(status);
+      state->unlock();
     });
 
     if (ret != 0)
-      awaitable.set_value(ret);
+    {
+      state->set_value(ret);
+      state->unlock();
+    }
     return awaitable.get_future();
   }
 
@@ -482,13 +613,16 @@ namespace awaituv
   auto close(T* handle, typename std::enable_if<is_uv_handle_t<T>::value>::type* dummy = nullptr)
   {
     promise_t<void> awaitable;
-    handle->data = awaitable._state.get();
+    auto state = awaitable._state->lock();
+    handle->data = state;
 
     // uv_close returns void so no need to test return value
     uv_close(reinterpret_cast<uv_handle_t*>(handle),
       [](uv_handle_t* req) -> void
     {
-      static_cast<awaitable_state<void>*>(req->data)->set_value();
+      auto state = static_cast<promise_t<void>::state_type*>(req->data);
+      state->set_value();
+      state->unlock();
     });
     return awaitable.get_future();
   }
@@ -514,16 +648,18 @@ namespace awaituv
   auto timer_start(uv_timer_t* timer, uint64_t timeout, uint64_t repeat)
   {
     promise_t<int> awaitable;
-    timer->data = awaitable._state.get();
+    auto state = awaitable._state.get();
+    timer->data = state;
 
     auto ret = ::uv_timer_start(timer,
       [](uv_timer_t* req) -> void
     {
-      static_cast<awaitable_state<int>*>(req->data)->set_value(0);
+      auto state = static_cast<promise_t<int>::state_type*>(req->data);
+      state->set_value(0);
     }, timeout, repeat);
 
     if (ret != 0)
-      awaitable.set_value(ret);
+      state->set_value(ret);
     return awaitable;
   }
 
@@ -554,16 +690,22 @@ namespace awaituv
   auto tcp_connect(uv_connect_t* req, uv_tcp_t* socket, const struct sockaddr* dest)
   {
     promise_t<int> awaitable;
-    req->data = awaitable._state.get();
+    auto state = awaitable._state->lock();
+    req->data = state;
 
     auto ret = ::uv_tcp_connect(req, socket, dest,
       [](uv_connect_t* req, int status) -> void
     {
-      static_cast<awaitable_state<int>*>(req->data)->set_value(status);
+      auto state = static_cast<promise_t<int>::state_type*>(req->data);
+      state->set_value(status);
+      state->unlock();
     });
 
     if (ret != 0)
-      awaitable.set_value(ret);
+    {
+      state->set_value(ret);
+      state->unlock();
+    }
     return awaitable.get_future();
   }
 
@@ -582,37 +724,6 @@ namespace awaituv
     return awaitable;
   }
 
-  auto getaddrinfo(uv_loop_t* loop, uv_getaddrinfo_t* req, const char* node, const char* service, const struct addrinfo* hints)
-  {
-    // Create an extended state to hold the addrinfo that is passed in the callback
-    struct addrinfo_state : public awaitable_state<int>
-    {
-      ::addrinfo* _addrinfo{ nullptr };
-      ~addrinfo_state()
-      {
-        uv_freeaddrinfo(_addrinfo);
-      }
-      void set_value(int status, addrinfo* addrinfo)
-      {
-        _addrinfo = addrinfo;
-        awaitable_state<int>::set_value(status);
-      }
-    };
-
-    promise_t<int, addrinfo_state> awaitable;
-    req->data = awaitable._state.get();
-
-    auto ret = ::uv_getaddrinfo(loop, req,
-      [](uv_getaddrinfo_t* req, int status, struct addrinfo* res) -> void
-    {
-      static_cast<addrinfo_state*>(req->data)->set_value(status, res);
-    }, node, service, hints);
-
-    if (ret != 0)
-      awaitable._state->set_value(ret, nullptr);
-    return awaitable.get_future();
-  }
-
   // Create an extended state to hold the addrinfo that is passed in the callback
   struct addrinfo_state : public awaitable_state<int>
   {
@@ -627,6 +738,28 @@ namespace awaituv
       awaitable_state<int>::set_value(status);
     }
   };
+
+  auto getaddrinfo(uv_loop_t* loop, uv_getaddrinfo_t* req, const char* node, const char* service, const struct addrinfo* hints)
+  {
+    promise_t<int, addrinfo_state> awaitable;
+    auto state = awaitable._state->lock();
+    req->data = state;
+
+    auto ret = ::uv_getaddrinfo(loop, req,
+      [](uv_getaddrinfo_t* req, int status, struct addrinfo* res) -> void
+    {
+      auto state = static_cast<promise_t<int, addrinfo_state>::state_type*>(req->data);
+      state->set_value(status, res);
+      state->unlock();
+    }, node, service, hints);
+
+    if (ret != 0)
+    {
+      state->set_value(ret, nullptr);
+      state->unlock();
+    }
+    return awaitable.get_future();
+  }
 
   auto& getaddrinfo(addrinfo_state& awaitable, uv_loop_t* loop, uv_getaddrinfo_t* req, const char* node, const char* service, const struct addrinfo* hints)
   {
@@ -643,12 +776,11 @@ namespace awaituv
     return awaitable;
   }
 
-  // A read_buffer is allocated dynamically and lifetime is controlled through shared_ptr
+  // A read_buffer is allocated dynamically and lifetime is controlled through counted_ptr
   // in read_request_t and in the read_buffer::awaitable.  We may need to allocate a read_buffer
   // before the client code calls read_next. Once they do, however, lifetime is controlled
   // by the future.
-  struct read_buffer : public awaitable_state<void>,
-    public std::enable_shared_from_this<read_buffer>
+  struct read_buffer : public awaitable_state<void>
   {
     uv_buf_t _buf = uv_buf_init(nullptr, 0);
     ssize_t _nread{ 0 };
@@ -666,10 +798,10 @@ namespace awaituv
       awaitable_state<void>::set_value();
     }
 
-    // The result of awaiting on this will be std::shared_ptr<read_buffer>.
-    std::shared_ptr<read_buffer> get_value()
+    // The result of awaiting on this will be std::counted_ptr<read_buffer>.
+    counted_ptr<read_buffer> get_value()
     {
-      return shared_from_this();
+      return static_cast<counted_awaitable_state<read_buffer>*>(this);
     }
   };
 
@@ -681,14 +813,14 @@ namespace awaituv
   // the data is passed to the callback and the second is where the future is not created first.
   class read_request_t
   {
-    std::list<std::shared_ptr<read_buffer>> _buffers;
+    std::list<counted_ptr<read_buffer>> _buffers;
     typedef future_t<void, read_buffer> future_read;
 
     // We have data to provide.  If there is already a promise that has a future, then
     // use that.  Otherwise, we need to create a new promise for this new data.
     void add_buffer(ssize_t nread, const uv_buf_t* buf)
     {
-      std::shared_ptr<read_buffer> promise;
+      counted_ptr<read_buffer> promise;
       if (!_buffers.empty())
       {
         promise = _buffers.front();
@@ -699,7 +831,7 @@ namespace awaituv
           return;
         }
       }
-      _buffers.emplace_back(std::make_shared<read_buffer>());
+      _buffers.emplace_back(make_counted<read_buffer>());
       _buffers.back()->set_value(nread, buf);
     }
 
@@ -721,7 +853,7 @@ namespace awaituv
           return future_read{ buffer };
         }
       }
-      auto buffer = std::make_shared<read_buffer>();
+      auto buffer = make_counted<read_buffer>();
       _buffers.push_back(buffer);
       return future_read{ buffer };
     }
