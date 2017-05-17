@@ -4,12 +4,12 @@ project (awaituv)
 
 if (MSVC)
 SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -await")
-link_libraries (libuv)
+link_libraries (libuv libcurl_imp)
 endif()
 
 if(UNIX)
 SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -lpthread -fcoroutines-ts")
-link_libraries (libuv.a)
+link_libraries (libuv.a libcurl.a)
 endif()
 
 set (CMAKE_CXX_STANDARD 14)

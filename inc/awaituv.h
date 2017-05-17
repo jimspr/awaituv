@@ -88,6 +88,11 @@ namespace awaituv
       awaitable_state_base::set_value();
     }
 
+    void finalize_value()
+    {
+      awaitable_state_base::set_value();
+    }
+
     auto get_value()
     {
       if (!_ready)
@@ -393,6 +398,10 @@ namespace awaituv
     string_buf_t(const char* p)
     {
       *(uv_buf_t*)this = uv_buf_init(const_cast<char*>(p), strlen(p));
+    }
+    string_buf_t(const char* p, size_t len)
+    {
+      *(uv_buf_t*)this = uv_buf_init(const_cast<char*>(p), len);
     }
   };
 
@@ -861,7 +870,7 @@ namespace awaituv
   };
 
   // note: read_start does not return a future. All futures are acquired through read_request_t::read_next
-  int read_start(uv_stream_t* handle, read_request_t* request)
+  inline int read_start(uv_stream_t* handle, read_request_t* request)
   {
     uv_read_stop(handle);
     request->_buffers.clear();
@@ -881,5 +890,22 @@ namespace awaituv
     );
 
     return res;
+  }
+
+  inline future_t<std::string> stream_to_string(uv_stream_t* handle)
+  {
+    read_request_t reader;
+    std::string str;
+    if (read_start(handle, &reader) == 0)
+    {
+      while (1)
+      {
+        auto state = co_await reader.read_next();
+        if (state->_nread <= 0)
+          break;
+        str.append(state->_buf.base, state->_nread);
+      }
+    }
+    return str;
   }
 } // namespace awaituv
