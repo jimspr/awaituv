@@ -1,15 +1,20 @@
 //#pragma once
 
-namespace std {
-namespace experimental {  
-template <typename R, typename...> struct coroutine_traits {
+namespace std
+{
+namespace experimental
+{
+template <typename R, typename...> struct coroutine_traits
+{
   using promise_type = typename R::promise_type;
 };
 
 template <typename Promise = void> struct coroutine_handle;
 
-template <> struct coroutine_handle<void> {
-  static coroutine_handle from_address(void *addr) noexcept {
+template <> struct coroutine_handle<void>
+{
+  static coroutine_handle from_address(void *addr) noexcept
+  {
     coroutine_handle me;
     me.ptr = addr;
     return me;
@@ -19,7 +24,8 @@ template <> struct coroutine_handle<void> {
   void resume() const { __builtin_coro_resume(ptr); }
   void destroy() const { __builtin_coro_destroy(ptr); }
   bool done() const { return __builtin_coro_done(ptr); }
-  coroutine_handle &operator=(decltype(nullptr)) {
+  coroutine_handle &operator=(decltype(nullptr))
+  {
     ptr = nullptr;
     return *this;
   }
@@ -32,25 +38,30 @@ protected:
   void *ptr;
 };
 
-template <typename Promise> struct coroutine_handle : coroutine_handle<> {
+template <typename Promise> struct coroutine_handle : coroutine_handle<>
+{
 
-  static coroutine_handle from_address(void *addr) noexcept {
+  static coroutine_handle from_address(void *addr) noexcept
+  {
     coroutine_handle me;
     me.ptr = addr;
     return me;
   }
   coroutine_handle() {}
   coroutine_handle(decltype(nullptr)) {}
-  coroutine_handle &operator=(decltype(nullptr)) {
+  coroutine_handle &operator=(decltype(nullptr))
+  {
     ptr = nullptr;
     return *this;
   }
 
-  Promise &promise() const {
+  Promise &promise() const
+  {
     return *reinterpret_cast<Promise *>(
-        __builtin_coro_promise(ptr, alignof(Promise), false));
+      __builtin_coro_promise(ptr, alignof(Promise), false));
   }
-  static coroutine_handle from_promise(Promise &promise) {
+  static coroutine_handle from_promise(Promise &promise)
+  {
     coroutine_handle p;
     p.ptr = __builtin_coro_promise(&promise, alignof(Promise), true);
     return p;
@@ -59,27 +70,34 @@ template <typename Promise> struct coroutine_handle : coroutine_handle<> {
 
 template <typename _PromiseT>
 bool operator==(coroutine_handle<_PromiseT> const &_Left,
-                coroutine_handle<_PromiseT> const &_Right) noexcept {
+  coroutine_handle<_PromiseT> const &_Right) noexcept
+{
   return _Left.address() == _Right.address();
 }
 
 template <typename _PromiseT>
 bool operator!=(coroutine_handle<_PromiseT> const &_Left,
-                coroutine_handle<_PromiseT> const &_Right) noexcept {
+  coroutine_handle<_PromiseT> const &_Right) noexcept
+{
   return !(_Left == _Right);
 }
 
-struct suspend_always {
+struct suspend_always
+{
   bool await_ready() { return false; }
   void await_suspend(coroutine_handle<>) {}
   void await_resume() {}
 };
-struct suspend_never {
+
+struct suspend_never
+{
   bool await_ready() { return true; }
   void await_suspend(coroutine_handle<>) {}
   void await_resume() {}
 };
-struct suspend_if {
+
+struct suspend_if
+{
   bool _Ready;
 
   explicit suspend_if(bool _Condition) : _Ready(!_Condition) {}
