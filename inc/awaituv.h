@@ -372,6 +372,34 @@ struct promise_t<void, state_t>
   }
 };
 
+
+// Simple RAII for uv_loop_t type
+class loop_t : public ::uv_loop_t
+{
+  int status = -1;
+public:
+  loop_t& operator=(const loop_t&) = delete; // no copy
+  loop_t()
+  {
+    status = uv_loop_init(this);
+    if (status != 0)
+        throw std::exception();
+  }
+  ~loop_t()
+  {
+    if (status == 0)
+      uv_loop_close(this);
+  }
+  int run()
+  {
+    return uv_run(this, UV_RUN_DEFAULT);
+  }
+  int run(uv_run_mode mode)
+  {
+    return uv_run(this, mode);
+  }
+};
+
 // Simple RAII for uv_fs_t type
 struct fs_t : public ::uv_fs_t
 {

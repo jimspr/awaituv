@@ -8,6 +8,29 @@ namespace awaitcurl
 {
 using namespace awaituv;
 
+// Provides a RAII type for CURL global initialization/cleanup
+struct curl_global_t
+{
+  curl_global_t& operator=(const curl_global_t&) = delete; // no copy
+  curl_global_t()
+  {
+    auto result = curl_global_init(CURL_GLOBAL_ALL);
+    if (result)
+      throw result;
+  }
+  curl_global_t(long flags)
+  {
+    auto result = curl_global_init(flags);
+    if (result)
+      throw result;
+  }
+  ~curl_global_t()
+  {
+    curl_global_cleanup();
+  }
+};
+
+// Basis http response type
 struct http_response_t
 {
   long http_code;
@@ -25,9 +48,9 @@ struct curl_context_t
   uv_poll_t poll_handle;
   curl_socket_t socket;
   curl_requester_t* requester;
-  curl_context_t(uv_loop_t* loop, curl_socket_t socket, curl_requester_t* requester) : socket(socket), requester(requester)
+  curl_context_t(uv_loop_t& loop, curl_socket_t socket, curl_requester_t* requester) : socket(socket), requester(requester)
   {
-    uv_poll_init_socket(loop, &poll_handle, socket);
+    uv_poll_init_socket(&loop, &poll_handle, socket);
     poll_handle.data = this;
   }
   ~curl_context_t()
@@ -44,17 +67,19 @@ struct curl_requester_t
   typedef int(*socket_callback)(CURL* easy, curl_socket_t s, int action, void* userp, void* socketp);
   typedef void(*timer_callback)(CURLM *multi, long timeout_ms, void *userp);
 
-  uv_loop_t* loop;
+  uv_loop_t& loop;
   CURLM* multi_handle;
   uv_timer_t timeout;
   bool verbose = false;
 
-  curl_requester_t(uv_loop_t* loop) : loop(loop)
+  curl_requester_t(uv_loop_t& loop) : loop(loop)
   {
-    uv_timer_init(loop, &timeout);
+    uv_timer_init(&loop, &timeout);
     timeout.data = this;
 
     multi_handle = curl_multi_init();
+    if (multi_handle == nullptr)
+      throw std::bad_alloc();
     curl_multi_setopt(multi_handle, CURLMOPT_SOCKETDATA, this);
     curl_multi_setopt(multi_handle, CURLMOPT_SOCKETFUNCTION,
       (socket_callback)[](CURL* easy, curl_socket_t s, int action, void* userp, void* socketp) -> int
