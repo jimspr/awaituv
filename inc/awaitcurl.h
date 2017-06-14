@@ -166,16 +166,27 @@ struct curl_requester_t
 
   void timer_function(CURLM* multi, long timeout_ms)
   {
-    if (timeout_ms <= 0)
-      timeout_ms = 1; // need at least 1ms
-    uv_timer_start(&timeout,
-      [](uv_timer_t* req) -> void
+    if (timeout_ms == -1) // delete timer
     {
-      auto requester = static_cast<curl_requester_t*>(req->data);
+      uv_timer_stop(&timeout);
+    }
+    else if (timeout_ms == 0)
+    {
       int running_handles;
-      curl_multi_socket_action(requester->multi_handle, CURL_SOCKET_TIMEOUT, 0, &running_handles);
-      requester->read_until_done();
-    }, timeout_ms, 0);
+      curl_multi_socket_action(multi_handle, CURL_SOCKET_TIMEOUT, 0, &running_handles);
+      read_until_done();
+    }
+    else
+    {
+      uv_timer_start(&timeout,
+        [](uv_timer_t* req) -> void
+      {
+        auto requester = static_cast<curl_requester_t*>(req->data);
+        int running_handles;
+        curl_multi_socket_action(requester->multi_handle, CURL_SOCKET_TIMEOUT, 0, &running_handles);
+        requester->read_until_done();
+      }, timeout_ms, 0);
+    }
   }
 
   void read_until_done(void)
