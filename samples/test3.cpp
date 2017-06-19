@@ -54,7 +54,7 @@ int main(int argc, char* argv[])
     return -1;
 
   {
-    curl_requester_t requester(uv_default_loop());
+    curl_requester_t requester(*uv_default_loop());
 
     test3(requester);
 

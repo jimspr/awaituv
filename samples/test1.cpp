@@ -24,6 +24,8 @@ future_t<void> start_color_changer()
   uv_tty_set_mode(&tty, UV_TTY_MODE_NORMAL);
 
   int cnt = 0;
+  // unref the timer so that its existence won't keep
+  // the loop alive
   unref(&color_timer);
 
   auto timer = timer_start(&color_timer, 1, 1);

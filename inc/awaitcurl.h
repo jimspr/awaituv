@@ -58,7 +58,7 @@ struct curl_context_t
   }
 };
 
-// Manages a "multi handle". Only one invoke can be in flight at any time.
+// Manages a "multi handle".
 struct curl_requester_t
 {
   // create some typedefs to make casting lambdas to correct function pointers easy.
@@ -109,26 +109,27 @@ struct curl_requester_t
     case CURL_POLL_IN:
     case CURL_POLL_OUT:
     case CURL_POLL_INOUT:
-    {
-      if (context == nullptr)
-        context = new curl_context_t(loop, s, this);
-      int events = 0;
-
-      curl_multi_assign(multi_handle, s, context);
-
-      if (action != CURL_POLL_IN)
-        events |= UV_WRITABLE;
-      if (action != CURL_POLL_OUT)
-        events |= UV_READABLE;
-
-      uv_poll_start(&context->poll_handle, events,
-        [](uv_poll_t *req, int status, int events) -> void
       {
-        auto requester = static_cast<curl_context_t *>(req->data)->requester;
-        requester->handle_events(req, status, events);
-      });
-    }
-    break;
+        // create a context if this is the first time
+        if (context == nullptr)
+          context = new curl_context_t(loop, s, this);
+        int events = 0;
+
+        curl_multi_assign(multi_handle, s, context);
+
+        if (action != CURL_POLL_IN)
+          events |= UV_WRITABLE;
+        if (action != CURL_POLL_OUT)
+          events |= UV_READABLE;
+
+        uv_poll_start(&context->poll_handle, events,
+          [](uv_poll_t *req, int status, int events) -> void
+        {
+          auto requester = static_cast<curl_context_t *>(req->data)->requester;
+          requester->handle_events(req, status, events);
+        });
+      }
+      break;
     case CURL_POLL_REMOVE:
       if (context != nullptr)
       {
@@ -148,6 +149,7 @@ struct curl_requester_t
     return 0;
   }
 
+  // handle poll events
   void handle_events(uv_poll_t *req, int status, int events)
   {
     uv_timer_stop(&timeout);
@@ -161,36 +163,7 @@ struct curl_requester_t
 
     int running_handles;
     curl_multi_socket_action(multi_handle, context->socket, mask, &running_handles);
-    read_until_done();
-  }
-
-  void timer_function(CURLM* multi, long timeout_ms)
-  {
-    if (timeout_ms == -1) // delete timer
-    {
-      uv_timer_stop(&timeout);
-    }
-    else if (timeout_ms == 0)
-    {
-      int running_handles;
-      curl_multi_socket_action(multi_handle, CURL_SOCKET_TIMEOUT, 0, &running_handles);
-      read_until_done();
-    }
-    else
-    {
-      uv_timer_start(&timeout,
-        [](uv_timer_t* req) -> void
-      {
-        auto requester = static_cast<curl_requester_t*>(req->data);
-        int running_handles;
-        curl_multi_socket_action(requester->multi_handle, CURL_SOCKET_TIMEOUT, 0, &running_handles);
-        requester->read_until_done();
-      }, timeout_ms, 0);
-    }
-  }
-
-  void read_until_done(void)
-  {
+    
     CURLMsg *message;
     int pending;
 
@@ -211,6 +184,28 @@ struct curl_requester_t
         state->finalize_value();
         state->unlock();
       }
+    }
+  }
+
+  // This is called for CURLMOPT_TIMERFUNCTION
+  void timer_function(CURLM* multi, long timeout_ms)
+  {
+    if (timeout_ms == -1) // delete timer
+      uv_timer_stop(&timeout);
+    else if (timeout_ms == 0) // process immediately
+    {
+      int running_handles;
+      curl_multi_socket_action(multi_handle, CURL_SOCKET_TIMEOUT, 0, &running_handles);
+    }
+    else // set a timer to process in the future
+    {
+      uv_timer_start(&timeout,
+        [](uv_timer_t* req) -> void
+      {
+        auto requester = static_cast<curl_requester_t*>(req->data);
+        int running_handles;
+        curl_multi_socket_action(requester->multi_handle, CURL_SOCKET_TIMEOUT, 0, &running_handles);
+      }, timeout_ms, 0);
     }
   }
 

@@ -5,6 +5,8 @@
 #include <list>
 #include <string.h>
 #include <atomic>
+#include <tuple>
+#include <assert.h>
 
 #ifdef __unix__
 #include <coroutine.h>
@@ -40,6 +42,8 @@ struct awaitable_state_base
 
   void set_coro(std::function<void(void)> cb)
   {
+    // Test to make sure nothing else is waiting on this future.
+    assert( ((cb == nullptr) || (_coro == nullptr)) && "This future is already being awaited.");
     _coro = cb;
   }
 
@@ -135,7 +139,10 @@ struct counted_awaitable_state : public awaitable_state_t
 {
   std::atomic<int> _count = 0; // tracks reference count of state object
 
-  counted_awaitable_state() = default;
+  template <typename ...Args>
+  counted_awaitable_state(Args&&... args) : _count{ 0 }, awaitable_state_t(std::forward<Args>(args)...)
+  {
+  }
   counted_awaitable_state(const counted_awaitable_state&) = delete;
   counted_awaitable_state(counted_awaitable_state&&) = delete;
 
@@ -231,10 +238,10 @@ protected:
   counted_awaitable_state<T>* _p = nullptr;
 };
 
-template <typename T>
-counted_ptr<T> make_counted()
+template <typename T, typename... Args>
+counted_ptr<T> make_counted(Args&&... args)
 {
-  return new counted_awaitable_state<T>{};
+  return new counted_awaitable_state<T>{ std::forward<Args>(args)... };
 }
 
 // The awaitable_state class is good enough for most cases, however there are some cases
@@ -246,6 +253,7 @@ struct promise_t;
 template <typename T, typename state_t = awaitable_state<T>>
 struct future_t
 {
+  typedef T type;
   typedef promise_t<T, state_t> promise_type;
   counted_ptr<state_t> _state;
 
@@ -289,10 +297,13 @@ struct promise_t
 {
   typedef future_t<T, state_t> future_type;
   typedef counted_awaitable_state<state_t> state_type;
-  counted_ptr<state_t> _state{ make_counted<state_t>() };
+  counted_ptr<state_t> _state;
 
   // movable not copyable
-  promise_t() = default;
+  template <typename ...Args>
+  promise_t(Args&&... args) : _state(make_counted<state_t>(std::forward<Args>(args)...))
+  {
+  }
   promise_t(const promise_t&) = delete;
   promise_t(promise_t&&) = default;
 
@@ -339,10 +350,13 @@ struct promise_t<void, state_t>
 {
   typedef future_t<void, state_t> future_type;
   typedef counted_awaitable_state<state_t> state_type;
-  counted_ptr<state_t> _state{ make_counted<state_t>() };
+  counted_ptr<state_t> _state;
 
   // movable not copyable
-  promise_t() = default;
+  template <typename ...Args>
+  promise_t(Args&&... args) : _state(make_counted<state_t>(std::forward<Args>(args)...))
+  {
+  }
   promise_t(const promise_t&) = delete;
   promise_t(promise_t&&) = default;
 
@@ -372,6 +386,144 @@ struct promise_t<void, state_t>
   }
 };
 
+// future_of_all is pretty trivial as we can just await on each argument
+
+template <typename T>
+future_t<void> future_of_all(T& f)
+{
+  co_await f;
+}
+
+template <typename T, typename... Rest>
+future_t<void> future_of_all(T& f, Rest&... args)
+{
+  co_await f;
+  co_await future_of_all(args...);
+}
+
+// future_of_all_range can take a vector/array of futures, although
+// they must be of the same time. It returns a vector of all the results.
+template <typename Iterator>
+auto future_of_all_range(Iterator begin, Iterator end) -> future_t<std::vector<decltype(begin->await_resume())>>
+{
+  std::vector<decltype(co_await *begin)> vec;
+  while (begin != end)
+  {
+    vec.push_back(co_await *begin);
+    ++begin;
+  }
+  return vec;
+}
+
+template <typename tuple_t>
+void set_coro_helper(tuple_t& tuple, std::function<void(void)> cb)
+{
+  // Define some helper templates to iterate through each element
+  // of the tuple
+  template <size_t N>
+  struct coro_helper
+  {
+    static void set(tuple_t& tuple, std::function<void(void)> cb)
+    {
+      std::get<N>(tuple)._state->set_coro(cb);
+      coro_helper<tuple_t, N-1>::set(tuple, cb);
+    }
+  };
+  // Specialization for last item
+  template <>
+  struct coro_helper<0>
+  {
+    static void set(tuple_t& tuple, std::function<void(void)> cb)
+    {
+      std::get<0>(tuple)._state->set_coro(cb);
+    }
+  };
+
+  coro_helper<tuple_t, std::tuple_size<tuple_t>::value - 1>::set(tuple, cb);
+}
+
+// allows waiting for just one future to complete
+template <typename... Rest>
+struct multi_awaitable_state : public awaitable_state<void>
+{
+  // Store references to all the futures passed in.
+  std::tuple<Rest&...> _futures;
+  multi_awaitable_state(Rest&... args) : _futures(args...)
+  {
+  }
+
+  void set_coro(std::function<void(void)> cb)
+  {
+    set_coro_helper(_futures, 
+      [this]()
+      {
+        // reset callbacks on all futures to stop them
+        set_coro_helper(_futures, nullptr);
+        set_value();
+      });
+    awaitable_state<void>::set_coro(cb);
+  }
+};
+
+// future_of_any is pretty complicated
+// We have to create a new promise with a custom awaitable state object
+template <typename T, typename... Rest>
+future_t<void, multi_awaitable_state<T, Rest...>> future_of_any(T& f, Rest&... args)
+{
+  promise_t<void, multi_awaitable_state<T, Rest...>> promise(f, args...);
+  return promise.get_future();
+}
+
+// iterator_awaitable_state will track the index of which future completed
+template <typename Iterator>
+struct iterator_awaitable_state : public awaitable_state<Iterator>
+{
+  Iterator _begin;
+  Iterator _end;
+  iterator_awaitable_state(Iterator begin, Iterator end) : _begin(begin), _end(end)
+  {
+  }
+
+  // any_completed will be called by any future completing
+  void any_completed(Iterator completed)
+  {
+    // stop any other callbacks from coming in
+    for (Iterator c = _begin; c != _end; ++c)
+      c->_state->set_coro(nullptr);
+    set_value(completed);
+  }
+
+  void set_coro(std::function<void(void)> cb)
+  {
+    for (Iterator c = _begin; c != _end; ++c)
+    {
+      std::function<void(void)> func = std::bind(&iterator_awaitable_state::any_completed, this, c);
+      c->_state->set_coro(func);
+    }
+    awaitable_state<Iterator>::set_coro(cb);
+  }
+};
+
+// returns the index of the iterator that succeeded
+template <typename Iterator>
+future_t<Iterator, iterator_awaitable_state<Iterator>> future_of_any_range(Iterator begin, Iterator end)
+{
+  promise_t<Iterator, iterator_awaitable_state<Iterator>> promise(begin, end);
+  return promise.get_future();
+}
+
+
+template<typename T1, typename S1, typename T2, typename S2>
+auto operator||(future_t<T1, S1>& t1, future_t<T2, S2>& t2)
+{
+  return future_of_any(t1, t2);
+}
+
+template<typename T1, typename S1, typename T2, typename S2>
+auto operator&&(future_t<T1, S1>& t1, future_t<T2, S2>& t2)
+{
+  return future_of_all(t1, t2);
+}
 
 // Simple RAII for uv_loop_t type
 class loop_t : public ::uv_loop_t
@@ -698,6 +850,25 @@ inline auto timer_start(uv_timer_t* timer, uint64_t timeout, uint64_t repeat)
   if (ret != 0)
     state->set_value(ret);
   return awaitable;
+}
+
+// This function does return a future as there is no repeat happening.
+inline auto timer_start(uv_timer_t* timer, uint64_t timeout)
+{
+  promise_t<int> awaitable;
+  auto state = awaitable._state.get();
+  timer->data = state;
+
+  auto ret = ::uv_timer_start(timer,
+    [](uv_timer_t* req) -> void
+  {
+    auto state = static_cast<promise_t<int>::state_type*>(req->data);
+    state->set_value(0);
+  }, timeout, 0);
+
+  if (ret != 0)
+    state->set_value(ret);
+  return awaitable.get_future();
 }
 
 struct timer_state_t : public awaitable_state<int>
