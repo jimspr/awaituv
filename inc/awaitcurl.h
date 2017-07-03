@@ -34,12 +34,21 @@ struct curl_global_t
 struct http_response_t
 {
   long http_code;
+  CURLcode curl_code;
+  std::string str;
+  std::vector<std::string> headers;
+
   bool is_success()
   {
     return (http_code >= 200) && (http_code <= 299);
   }
-  std::string str;
-  CURLcode curl_code;
+
+  void print_response(const char *msg)
+  {
+    printf("-----------------------------------------------------------------------------------\n");
+    printf("%s: http:%d curl:%d-\"%s\"\n%s\n", msg, http_code, curl_code, curl_easy_strerror(curl_code), str.c_str());
+  }
+
 };
 
 struct curl_requester_t;
@@ -64,6 +73,7 @@ struct curl_requester_t
   // create some typedefs to make casting lambdas to correct function pointers easy.
   // curl_multi_setopt is a vararg function and passing a lambda directly does not work.
   typedef size_t(*write_callback)(char *ptr, size_t size, size_t nmemb, void *userdata);
+  typedef size_t(*header_callback)(char *ptr, size_t size, size_t nmemb, void *userdata);
   typedef int(*socket_callback)(CURL* easy, curl_socket_t s, int action, void* userp, void* socketp);
   typedef void(*timer_callback)(CURLM *multi, long timeout_ms, void *userp);
 
@@ -109,27 +119,27 @@ struct curl_requester_t
     case CURL_POLL_IN:
     case CURL_POLL_OUT:
     case CURL_POLL_INOUT:
+    {
+      // create a context if this is the first time
+      if (context == nullptr)
+        context = new curl_context_t(loop, s, this);
+      int events = 0;
+
+      curl_multi_assign(multi_handle, s, context);
+
+      if (action != CURL_POLL_IN)
+        events |= UV_WRITABLE;
+      if (action != CURL_POLL_OUT)
+        events |= UV_READABLE;
+
+      uv_poll_start(&context->poll_handle, events,
+        [](uv_poll_t *req, int status, int events) -> void
       {
-        // create a context if this is the first time
-        if (context == nullptr)
-          context = new curl_context_t(loop, s, this);
-        int events = 0;
-
-        curl_multi_assign(multi_handle, s, context);
-
-        if (action != CURL_POLL_IN)
-          events |= UV_WRITABLE;
-        if (action != CURL_POLL_OUT)
-          events |= UV_READABLE;
-
-        uv_poll_start(&context->poll_handle, events,
-          [](uv_poll_t *req, int status, int events) -> void
-        {
-          auto requester = static_cast<curl_context_t *>(req->data)->requester;
-          requester->handle_events(req, status, events);
-        });
-      }
-      break;
+        auto requester = static_cast<curl_context_t *>(req->data)->requester;
+        requester->handle_events(req, status, events);
+      });
+    }
+    break;
     case CURL_POLL_REMOVE:
       if (context != nullptr)
       {
@@ -163,7 +173,12 @@ struct curl_requester_t
 
     int running_handles;
     curl_multi_socket_action(multi_handle, context->socket, mask, &running_handles);
-    
+
+    process_messages();
+  }
+
+  void process_messages()
+  {
     CURLMsg *message;
     int pending;
 
@@ -196,6 +211,7 @@ struct curl_requester_t
     {
       int running_handles;
       curl_multi_socket_action(multi_handle, CURL_SOCKET_TIMEOUT, 0, &running_handles);
+      process_messages();
     }
     else // set a timer to process in the future
     {
@@ -205,6 +221,7 @@ struct curl_requester_t
         auto requester = static_cast<curl_requester_t*>(req->data);
         int running_handles;
         curl_multi_socket_action(requester->multi_handle, CURL_SOCKET_TIMEOUT, 0, &running_handles);
+        requester->process_messages();
       }, timeout_ms, 0);
     }
   }
@@ -224,8 +241,17 @@ struct curl_requester_t
       state->_value.str += std::string(buffer, buffer + size * nmemb);
       return size * nmemb;
     });
-
     curl_easy_setopt(handle, CURLOPT_WRITEDATA, state);
+
+    curl_easy_setopt(handle, CURLOPT_HEADERFUNCTION,
+      (header_callback)[](char *buffer, size_t size, size_t nmemb, void *userp)->size_t
+    {
+      auto state = static_cast<promise_t<http_response_t>::state_type*>(userp);
+      state->_value.headers.push_back(std::string(buffer, buffer + size * nmemb));
+      return size * nmemb;
+    });
+    curl_easy_setopt(handle, CURLOPT_HEADERDATA, state);
+
     curl_easy_setopt(handle, CURLOPT_PRIVATE, state);
     curl_multi_add_handle(multi_handle, handle);
 
