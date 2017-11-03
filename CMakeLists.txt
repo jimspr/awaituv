@@ -1,15 +1,17 @@
 cmake_minimum_required (VERSION 2.6)
 project (awaituv)
 
+find_package(CURL REQUIRED)
+link_libraries(${CURL_LIBRARIES})
 
 if (MSVC)
 SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -await")
-link_libraries (libuv libcurl_imp)
+link_libraries (libuv)
 endif()
 
 if(UNIX)
 SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -lpthread -fcoroutines-ts")
-link_libraries (libuv.a libcurl.a)
+link_libraries (libuv.a)
 endif()
 
 set (CMAKE_CXX_STANDARD 14)

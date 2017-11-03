@@ -46,7 +46,7 @@ struct http_response_t
   void print_response(const char *msg)
   {
     printf("-----------------------------------------------------------------------------------\n");
-    printf("%s: http:%d curl:%d-\"%s\"\n%s\n", msg, http_code, curl_code, curl_easy_strerror(curl_code), str.c_str());
+    printf("%s: http:%ld curl:%d-\"%s\"\n%s\n", msg, http_code, curl_code, curl_easy_strerror(curl_code), str.c_str());
   }
 
 };
@@ -232,7 +232,7 @@ struct curl_requester_t
     auto state = promise._state->lock();
 
     if (verbose)
-      curl_easy_setopt(handle, CURLOPT_VERBOSE);
+      curl_easy_setopt(handle, CURLOPT_VERBOSE, 1);
 
     curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION,
       (write_callback)[](char *buffer, size_t size, size_t nmemb, void *userp)->size_t
@@ -267,7 +267,7 @@ struct curl_requester_t
     // await the invoke so that the handle can be cleaned up after it's done
     auto response = co_await this->invoke(handle);
     curl_easy_cleanup(handle);
-    return response;
+    co_return response;
   }
 };
 

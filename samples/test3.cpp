@@ -27,7 +27,7 @@ future_t<void> test3(curl_requester_t& requester)
   auto result = co_await requester.invoke(curl);
   if (result.curl_code == CURLE_OK)
   {
-    sprintf_s(buffer, "http_code: %d\n", result.http_code);
+    sprintf(buffer, "http_code: %ld\n", result.http_code);
     string_buf_t buf{ buffer, strlen(buffer) };
     fs_t writereq;
     (void)co_await fs_write(uv_default_loop(), &writereq, 1 /*stdout*/, &buf, 1, -1);
@@ -38,14 +38,14 @@ future_t<void> test3(curl_requester_t& requester)
   }
   else
   {
-    sprintf_s(buffer, "failed %d\n", result.curl_code);
+    sprintf(buffer, "failed %d\n", result.curl_code);
     string_buf_t buf{ buffer, strlen(buffer) };
     fs_t writereq;
     (void)co_await fs_write(uv_default_loop(), &writereq, 1 /*stdout*/, &buf, 1, -1);
   }
 
   curl_slist_free_all(headers);
-  return;
+  co_return;
 }
 
 int main(int argc, char* argv[])

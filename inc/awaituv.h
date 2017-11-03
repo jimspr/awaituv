@@ -137,7 +137,7 @@ struct awaitable_state<void> : public awaitable_state_base
 template <typename awaitable_state_t>
 struct counted_awaitable_state : public awaitable_state_t
 {
-  std::atomic<int> _count = 0; // tracks reference count of state object
+  std::atomic<int> _count {0}; // tracks reference count of state object
 
   template <typename ...Args>
   counted_awaitable_state(Args&&... args) : _count{ 0 }, awaitable_state_t(std::forward<Args>(args)...)
@@ -404,42 +404,43 @@ future_t<void> future_of_all(T& f, Rest&... args)
 // future_of_all_range can take a vector/array of futures, although
 // they must be of the same time. It returns a vector of all the results.
 template <typename Iterator>
-auto future_of_all_range(Iterator begin, Iterator end) -> future_t<std::vector<decltype(begin->await_resume())>>
+auto future_of_all_range(Iterator begin, Iterator end) -> future_t<std::vector<typename decltype(*begin)::type>>
 {
-  std::vector<decltype(co_await *begin)> vec;
+  std::vector<typename decltype(*begin)::type> vec;
   while (begin != end)
   {
     vec.push_back(co_await *begin);
     ++begin;
   }
-  return vec;
+  co_return vec;
 }
 
-template <typename tuple_t>
-void set_coro_helper(tuple_t& tuple, std::function<void(void)> cb)
+// Define some helper templates to iterate through each element
+// of the tuple
+template <typename tuple_t, size_t N>
+struct coro_helper_t
 {
-  // Define some helper templates to iterate through each element
-  // of the tuple
-  template <size_t N>
-  struct coro_helper
+  static void set(tuple_t& tuple, std::function<void(void)> cb)
   {
-    static void set(tuple_t& tuple, std::function<void(void)> cb)
-    {
-      std::get<N>(tuple)._state->set_coro(cb);
-      coro_helper<tuple_t, N-1>::set(tuple, cb);
-    }
-  };
-  // Specialization for last item
-  template <>
-  struct coro_helper<0>
+    std::get<N>(tuple)._state->set_coro(cb);
+    coro_helper_t<tuple_t, N-1>::set(tuple, cb);
+  }
+};
+// Specialization for last item
+template <typename tuple_t>
+struct coro_helper_t<tuple_t, 0>
+{
+  static void set(tuple_t& tuple, std::function<void(void)> cb)
   {
-    static void set(tuple_t& tuple, std::function<void(void)> cb)
-    {
-      std::get<0>(tuple)._state->set_coro(cb);
-    }
-  };
+    std::get<0>(tuple)._state->set_coro(cb);
+  }
+};
 
-  coro_helper<tuple_t, std::tuple_size<tuple_t>::value - 1>::set(tuple, cb);
+template <typename tuple_t>
+void set_coro_helper_t(tuple_t& tuple, std::function<void(void)> cb)
+{
+
+  coro_helper_t<tuple_t, std::tuple_size<tuple_t>::value - 1>::set(tuple, cb);
 }
 
 // allows waiting for just one future to complete
@@ -1105,6 +1106,6 @@ inline future_t<std::string> stream_to_string(uv_stream_t* handle)
       str.append(state->_buf.base, state->_nread);
     }
   }
-  return str;
+  co_return str;
 }
 } // namespace awaituv
