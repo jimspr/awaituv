@@ -404,6 +404,18 @@ future_t<void> future_of_all(T& f, Rest&... args)
 // future_of_all_range can take a vector/array of futures, although
 // they must be of the same time. It returns a vector of all the results.
 template <typename Iterator>
+#ifdef _MSC_VER
+auto future_of_all_range(Iterator begin, Iterator end) -> future_t<std::vector<decltype(begin->await_resume())>>
+{
+  std::vector<decltype(co_await *begin)> vec;
+  while (begin != end)
+  {
+    vec.push_back(co_await *begin);
+    ++begin;
+  }
+  co_return vec;
+}
+#else
 auto future_of_all_range(Iterator begin, Iterator end) -> future_t<std::vector<typename decltype(*begin)::type>>
 {
   std::vector<typename decltype(*begin)::type> vec;
@@ -414,6 +426,7 @@ auto future_of_all_range(Iterator begin, Iterator end) -> future_t<std::vector<t
   }
   co_return vec;
 }
+#endif
 
 // Define some helper templates to iterate through each element
 // of the tuple
