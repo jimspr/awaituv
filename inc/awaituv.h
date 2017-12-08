@@ -6,6 +6,7 @@
 #include <string.h>
 #include <atomic>
 #include <tuple>
+#include <vector>
 #include <assert.h>
 
 #ifdef __unix__
@@ -450,9 +451,8 @@ struct coro_helper_t<tuple_t, 0>
 };
 
 template <typename tuple_t>
-void set_coro_helper_t(tuple_t& tuple, std::function<void(void)> cb)
+void set_coro_helper(tuple_t& tuple, std::function<void(void)> cb)
 {
-
   coro_helper_t<tuple_t, std::tuple_size<tuple_t>::value - 1>::set(tuple, cb);
 }
 
