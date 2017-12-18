@@ -41,7 +41,7 @@ struct awaitable_state_base
   awaitable_state_base(awaitable_state_base&&) = delete;
   awaitable_state_base(const awaitable_state_base&) = delete;
 
-  void set_coro(std::function<void(void)> cb)
+  void set_coroutine_callback(std::function<void(void)> cb)
   {
     // Test to make sure nothing else is waiting on this future.
     assert( ((cb == nullptr) || (_coro == nullptr)) && "This future is already being awaited.");
@@ -71,14 +71,14 @@ struct awaitable_state_base
   }
 
   // functions that make this directly awaitable
-  bool await_ready()
+  bool await_ready() const
   {
     return _ready;
   }
 
   void await_suspend(std::experimental::coroutine_handle<> resume_cb)
   {
-    set_coro(resume_cb);
+    set_coroutine_callback(resume_cb);
   }
 };
 
@@ -112,7 +112,7 @@ struct awaitable_state : public awaitable_state_base
   }
 
   // make this directly awaitable
-  auto await_resume()
+  auto await_resume() const
   {
     return _value;
   }
@@ -122,14 +122,14 @@ struct awaitable_state : public awaitable_state_base
 template <>
 struct awaitable_state<void> : public awaitable_state_base
 {
-  void get_value()
+  void get_value() const
   {
     if (!_ready)
       throw future_exception{ future_error::not_ready };
   }
 
   // make this directly awaitable
-  void await_resume()
+  void await_resume() const
   {
   }
 };
@@ -205,12 +205,12 @@ struct counted_ptr
     _unlock();
   }
 
-  counted_awaitable_state<T>* operator->()
+  counted_awaitable_state<T>* operator->() const
   {
     return _p;
   }
 
-  counted_awaitable_state<T>* get()
+  counted_awaitable_state<T>* get() const
   {
     return _p;
   }
@@ -265,29 +265,31 @@ struct future_t
 
   // movable, but not copyable
   future_t(const future_t&) = delete;
+  future_t& operator=(const future_t&) = delete;
   future_t(future_t&& f) = default;
+  future_t& operator=(future_t&&) = default;
 
-  auto await_resume()
+  auto await_resume() const
   {
     return _state->get_value();
   }
 
-  bool await_ready()
+  bool await_ready() const
   {
     return _state->_ready;
   }
 
   void await_suspend(std::experimental::coroutine_handle<> resume_cb)
   {
-    _state->set_coro(resume_cb);
+    _state->set_coroutine_callback(resume_cb);
   }
 
-  bool ready()
+  bool ready() const
   {
     return _state->_ready;
   }
 
-  auto get_value()
+  auto get_value() const
   {
     return _state->get_value();
   }
@@ -330,12 +332,12 @@ struct promise_t
     return future_type(_state);
   }
 
-  std::experimental::suspend_never initial_suspend()
+  std::experimental::suspend_never initial_suspend() const
   {
     return {};
   }
 
-  std::experimental::suspend_never final_suspend()
+  std::experimental::suspend_never final_suspend() const
   {
     return {};
   }
@@ -371,12 +373,12 @@ struct promise_t<void, state_t>
     return future_type(_state);
   }
 
-  std::experimental::suspend_never initial_suspend()
+  std::experimental::suspend_never initial_suspend() const
   {
     return {};
   }
 
-  std::experimental::suspend_never final_suspend()
+  std::experimental::suspend_never final_suspend() const
   {
     return {};
   }
@@ -436,7 +438,7 @@ struct coro_helper_t
 {
   static void set(tuple_t& tuple, std::function<void(void)> cb)
   {
-    std::get<N>(tuple)._state->set_coro(cb);
+    std::get<N>(tuple)._state->set_coroutine_callback(cb);
     coro_helper_t<tuple_t, N-1>::set(tuple, cb);
   }
 };
@@ -446,7 +448,7 @@ struct coro_helper_t<tuple_t, 0>
 {
   static void set(tuple_t& tuple, std::function<void(void)> cb)
   {
-    std::get<0>(tuple)._state->set_coro(cb);
+    std::get<0>(tuple)._state->set_coroutine_callback(cb);
   }
 };
 
@@ -466,7 +468,7 @@ struct multi_awaitable_state : public awaitable_state<void>
   {
   }
 
-  void set_coro(std::function<void(void)> cb)
+  void set_coroutine_callback(std::function<void(void)> cb)
   {
     set_coro_helper(_futures, 
       [this]()
@@ -475,7 +477,7 @@ struct multi_awaitable_state : public awaitable_state<void>
         set_coro_helper(_futures, nullptr);
         set_value();
       });
-    awaitable_state<void>::set_coro(cb);
+    awaitable_state<void>::set_coroutine_callback(cb);
   }
 };
 
@@ -503,18 +505,18 @@ struct iterator_awaitable_state : public awaitable_state<Iterator>
   {
     // stop any other callbacks from coming in
     for (Iterator c = _begin; c != _end; ++c)
-      c->_state->set_coro(nullptr);
+      c->_state->set_coroutine_callback(nullptr);
     set_value(completed);
   }
 
-  void set_coro(std::function<void(void)> cb)
+  void set_coroutine_callback(std::function<void(void)> cb)
   {
     for (Iterator c = _begin; c != _end; ++c)
     {
       std::function<void(void)> func = std::bind(&iterator_awaitable_state::any_completed, this, c);
-      c->_state->set_coro(func);
+      c->_state->set_coroutine_callback(func);
     }
-    awaitable_state<Iterator>::set_coro(cb);
+    awaitable_state<Iterator>::set_coroutine_callback(cb);
   }
 };
 
