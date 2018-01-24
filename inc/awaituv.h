@@ -4,13 +4,14 @@
 #include <memory>
 #include <list>
 #include <string.h>
+#include <string>
 #include <atomic>
 #include <tuple>
 #include <vector>
 #include <assert.h>
 
-#ifdef __unix__
-#include <coroutine.h>
+#if __has_include(<experimental/coroutine>)
+#include <experimental/coroutine>
 #else
 #include <experimental\resumable>
 #endif
@@ -163,7 +164,7 @@ protected:
 };
 
 // counted_ptr is similar to shared_ptr but allows explicit control
-// 
+//
 template <typename T>
 struct counted_ptr
 {
@@ -346,6 +347,11 @@ struct promise_t
   {
     _state->set_value(val);
   }
+
+  [[noreturn]] void unhandled_exception()
+  {
+    std::terminate();
+  }
 };
 
 template <typename state_t>
@@ -386,6 +392,11 @@ struct promise_t<void, state_t>
   void return_void()
   {
     _state->set_value();
+  }
+
+  [[noreturn]] void unhandled_exception()
+  {
+     std::terminate();
   }
 };
 
@@ -470,7 +481,7 @@ struct multi_awaitable_state : public awaitable_state<void>
 
   void set_coroutine_callback(std::function<void(void)> cb)
   {
-    set_coro_helper(_futures, 
+    set_coro_helper(_futures,
       [this]()
       {
         // reset callbacks on all futures to stop them
@@ -602,7 +613,7 @@ struct string_buf_t : ::uv_buf_t
 };
 
 // is_uv_handle_t checks for three data members: data, loop, and type.
-// These members mean this type is convertible to a uv_handle_t. This 
+// These members mean this type is convertible to a uv_handle_t. This
 // can be used to make it easier to call functions that take a handle.
 template <typename T, typename = int, typename = int, typename = int>
 struct is_uv_handle_t : std::false_type
@@ -1030,7 +1041,7 @@ struct read_buffer : public awaitable_state<void>
 };
 
 // For reads, we need to define a new type to hold the completed read callbacks as we may not have
-// a future for them yet.  This is somewhat equivalent to other libuv functions that take a uv_write_t 
+// a future for them yet.  This is somewhat equivalent to other libuv functions that take a uv_write_t
 // or a uv_fs_t.
 // This is a little convoluted as uv_read_start is not a one-shot read, but continues to provide
 // data to its callback.  So, we need to handle two cases.  One is where the future is created before

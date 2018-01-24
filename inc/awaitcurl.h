@@ -3,6 +3,7 @@
 #include <vector>
 #include <awaituv.h>
 #include <curl/curl.h>
+#include <stdio.h>
 
 namespace awaitcurl
 {
