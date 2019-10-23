@@ -1,17 +1,15 @@
 #pragma once
-#include <string>
-#include <vector>
 #include <awaituv.h>
 #include <curl/curl.h>
 #include <stdio.h>
+#include <string>
+#include <vector>
 
-namespace awaitcurl
-{
+namespace awaitcurl {
 using namespace awaituv;
 
 // Provides a RAII type for CURL global initialization/cleanup
-struct curl_global_t
-{
+struct curl_global_t {
   curl_global_t& operator=(const curl_global_t&) = delete; // no copy
   curl_global_t()
   {
@@ -32,11 +30,10 @@ struct curl_global_t
 };
 
 // Basis http response type
-struct http_response_t
-{
-  long http_code;
-  CURLcode curl_code;
-  std::string str;
+struct http_response_t {
+  long                     http_code;
+  CURLcode                 curl_code;
+  std::string              str;
   std::vector<std::string> headers;
 
   bool is_success()
@@ -44,44 +41,55 @@ struct http_response_t
     return (http_code >= 200) && (http_code <= 299);
   }
 
-  void print_response(const char *msg)
+  void print_response(const char* msg)
   {
-    printf("-----------------------------------------------------------------------------------\n");
-    printf("%s: http:%ld curl:%d-\"%s\"\n%s\n", msg, http_code, curl_code, curl_easy_strerror(curl_code), str.c_str());
+    printf(
+        "-----------------------------------------------------------------------------------\n");
+    printf("%s: http:%ld curl:%d-\"%s\"\n%s\n", msg, http_code, curl_code,
+           curl_easy_strerror(curl_code), str.c_str());
   }
-
 };
 
 struct curl_requester_t;
-struct curl_context_t
-{
-  uv_poll_t poll_handle;
-  curl_socket_t socket;
+struct curl_context_t {
+  uv_poll_t         poll_handle;
+  curl_socket_t     socket;
   curl_requester_t* requester;
-  curl_context_t(uv_loop_t& loop, curl_socket_t socket, curl_requester_t* requester) : socket(socket), requester(requester)
+  curl_context_t(uv_loop_t&        loop,
+                 curl_socket_t     socket,
+                 curl_requester_t* requester)
+    : socket(socket), requester(requester)
   {
     uv_poll_init_socket(&loop, &poll_handle, socket);
     poll_handle.data = this;
   }
-  ~curl_context_t()
-  {
-  }
+  ~curl_context_t() {}
 };
 
 // Manages a "multi handle".
-struct curl_requester_t
-{
-  // create some typedefs to make casting lambdas to correct function pointers easy.
-  // curl_multi_setopt is a vararg function and passing a lambda directly does not work.
-  typedef size_t(*write_callback)(char *ptr, size_t size, size_t nmemb, void *userdata);
-  typedef size_t(*header_callback)(char *ptr, size_t size, size_t nmemb, void *userdata);
-  typedef int(*socket_callback)(CURL* easy, curl_socket_t s, int action, void* userp, void* socketp);
-  typedef void(*timer_callback)(CURLM *multi, long timeout_ms, void *userp);
+struct curl_requester_t {
+  // create some typedefs to make casting lambdas to correct function pointers
+  // easy. curl_multi_setopt is a vararg function and passing a lambda directly
+  // does not work.
+  typedef size_t (*write_callback)(char*  ptr,
+                                   size_t size,
+                                   size_t nmemb,
+                                   void*  userdata);
+  typedef size_t (*header_callback)(char*  ptr,
+                                    size_t size,
+                                    size_t nmemb,
+                                    void*  userdata);
+  typedef int (*socket_callback)(CURL*         easy,
+                                 curl_socket_t s,
+                                 int           action,
+                                 void*         userp,
+                                 void*         socketp);
+  typedef void (*timer_callback)(CURLM* multi, long timeout_ms, void* userp);
 
   uv_loop_t& loop;
-  CURLM* multi_handle;
+  CURLM*     multi_handle;
   uv_timer_t timeout;
-  bool verbose = false;
+  bool       verbose = false;
 
   curl_requester_t(uv_loop_t& loop) : loop(loop)
   {
@@ -92,19 +100,21 @@ struct curl_requester_t
     if (multi_handle == nullptr)
       throw std::bad_alloc();
     curl_multi_setopt(multi_handle, CURLMOPT_SOCKETDATA, this);
-    curl_multi_setopt(multi_handle, CURLMOPT_SOCKETFUNCTION,
-      (socket_callback)[](CURL* easy, curl_socket_t s, int action, void* userp, void* socketp) -> int
-    {
-      auto requester = static_cast<curl_requester_t*>(userp);
-      return requester->socket_function(easy, s, action, socketp);
-    });
+    curl_multi_setopt(
+        multi_handle, CURLMOPT_SOCKETFUNCTION,
+        (socket_callback)[](CURL * easy, curl_socket_t s, int action,
+                            void* userp, void* socketp)
+            ->int {
+              auto requester = static_cast<curl_requester_t*>(userp);
+              return requester->socket_function(easy, s, action, socketp);
+            });
     curl_multi_setopt(multi_handle, CURLMOPT_TIMERDATA, this);
-    curl_multi_setopt(multi_handle, CURLMOPT_TIMERFUNCTION,
-      (timer_callback)[](CURLM *multi, long timeout_ms, void *userp) -> void
-    {
-      auto requester = static_cast<curl_requester_t*>(userp);
-      requester->timer_function(multi, timeout_ms);
-    });
+    curl_multi_setopt(
+        multi_handle, CURLMOPT_TIMERFUNCTION,
+        (timer_callback)[](CURLM * multi, long timeout_ms, void* userp)->void {
+          auto requester = static_cast<curl_requester_t*>(userp);
+          requester->timer_function(multi, timeout_ms);
+        });
   }
 
   ~curl_requester_t()
@@ -114,13 +124,11 @@ struct curl_requester_t
 
   int socket_function(CURL* easy, curl_socket_t s, int action, void* socketp)
   {
-    curl_context_t* context = static_cast<curl_context_t *>(socketp);
-    switch (action)
-    {
+    curl_context_t* context = static_cast<curl_context_t*>(socketp);
+    switch (action) {
     case CURL_POLL_IN:
     case CURL_POLL_OUT:
-    case CURL_POLL_INOUT:
-    {
+    case CURL_POLL_INOUT: {
       // create a context if this is the first time
       if (context == nullptr)
         context = new curl_context_t(loop, s, this);
@@ -134,23 +142,20 @@ struct curl_requester_t
         events |= UV_READABLE;
 
       uv_poll_start(&context->poll_handle, events,
-        [](uv_poll_t *req, int status, int events) -> void
-      {
-        auto requester = static_cast<curl_context_t *>(req->data)->requester;
-        requester->handle_events(req, status, events);
-      });
-    }
-    break;
+                    [](uv_poll_t* req, int status, int events) -> void {
+                      auto requester =
+                          static_cast<curl_context_t*>(req->data)->requester;
+                      requester->handle_events(req, status, events);
+                    });
+    } break;
     case CURL_POLL_REMOVE:
-      if (context != nullptr)
-      {
+      if (context != nullptr) {
         uv_poll_stop(&context->poll_handle);
-        uv_close((uv_handle_t *)&context->poll_handle,
-          [](uv_handle_t *handle) -> void
-        {
-          auto context = static_cast<curl_context_t *>(handle->data);
-          delete context;
-        });
+        uv_close((uv_handle_t*)&context->poll_handle,
+                 [](uv_handle_t* handle) -> void {
+                   auto context = static_cast<curl_context_t*>(handle->data);
+                   delete context;
+                 });
 
         curl_multi_assign(multi_handle, s, NULL);
       }
@@ -161,10 +166,10 @@ struct curl_requester_t
   }
 
   // handle poll events
-  void handle_events(uv_poll_t *req, int status, int events)
+  void handle_events(uv_poll_t* req, int status, int events)
   {
     uv_timer_stop(&timeout);
-    auto context = static_cast<curl_context_t *>(req->data);
+    auto context = static_cast<curl_context_t*>(req->data);
 
     int mask = 0;
     if (events & UV_READABLE)
@@ -173,29 +178,29 @@ struct curl_requester_t
       mask |= CURL_CSELECT_OUT;
 
     int running_handles;
-    curl_multi_socket_action(multi_handle, context->socket, mask, &running_handles);
+    curl_multi_socket_action(multi_handle, context->socket, mask,
+                             &running_handles);
 
     process_messages();
   }
 
   void process_messages()
   {
-    CURLMsg *message;
-    int pending;
+    CURLMsg* message;
+    int      pending;
 
-    while ((message = curl_multi_info_read(multi_handle, &pending)))
-    {
-      if (message->msg == CURLMSG_DONE)
-      {
+    while ((message = curl_multi_info_read(multi_handle, &pending))) {
+      if (message->msg == CURLMSG_DONE) {
         CURL* handle = message->easy_handle;
 
         promise_t<http_response_t>::state_type* state;
         curl_easy_getinfo(handle, CURLINFO_PRIVATE, &state);
         state->_value.curl_code = message->data.result;
 
-        curl_easy_getinfo(handle, CURLINFO_RESPONSE_CODE, &state->_value.http_code);
-        // finalize_value will resume the coroutine and the easy handle coudl be released
-        // so remove it now.
+        curl_easy_getinfo(handle, CURLINFO_RESPONSE_CODE,
+                          &state->_value.http_code);
+        // finalize_value will resume the coroutine and the easy handle coudl
+        // be released so remove it now.
         curl_multi_remove_handle(multi_handle, handle);
         state->finalize_value();
         state->unlock();
@@ -211,46 +216,55 @@ struct curl_requester_t
     else if (timeout_ms == 0) // process immediately
     {
       int running_handles;
-      curl_multi_socket_action(multi_handle, CURL_SOCKET_TIMEOUT, 0, &running_handles);
+      curl_multi_socket_action(multi_handle, CURL_SOCKET_TIMEOUT, 0,
+                               &running_handles);
       process_messages();
-    }
-    else // set a timer to process in the future
+    } else // set a timer to process in the future
     {
-      uv_timer_start(&timeout,
-        [](uv_timer_t* req) -> void
-      {
-        auto requester = static_cast<curl_requester_t*>(req->data);
-        int running_handles;
-        curl_multi_socket_action(requester->multi_handle, CURL_SOCKET_TIMEOUT, 0, &running_handles);
-        requester->process_messages();
-      }, timeout_ms, 0);
+      uv_timer_start(
+          &timeout,
+          [](uv_timer_t* req) -> void {
+            auto requester = static_cast<curl_requester_t*>(req->data);
+            int  running_handles;
+            curl_multi_socket_action(requester->multi_handle,
+                                     CURL_SOCKET_TIMEOUT, 0, &running_handles);
+            requester->process_messages();
+          },
+          timeout_ms, 0);
     }
   }
 
   future_t<http_response_t> invoke(CURL* handle)
   {
     promise_t<http_response_t> promise;
-    auto state = promise._state->lock();
+    auto                       state = promise._state->lock();
 
     if (verbose)
       curl_easy_setopt(handle, CURLOPT_VERBOSE, 1);
 
-    curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION,
-      (write_callback)[](char *buffer, size_t size, size_t nmemb, void *userp)->size_t
-    {
-      auto state = static_cast<promise_t<http_response_t>::state_type*>(userp);
-      state->_value.str += std::string(buffer, buffer + size * nmemb);
-      return size * nmemb;
-    });
+    curl_easy_setopt(
+        handle, CURLOPT_WRITEFUNCTION,
+        (write_callback)[](char* buffer, size_t size, size_t nmemb,
+                           void* userp)
+            ->size_t {
+              auto state =
+                  static_cast<promise_t<http_response_t>::state_type*>(userp);
+              state->_value.str += std::string(buffer, buffer + size * nmemb);
+              return size * nmemb;
+            });
     curl_easy_setopt(handle, CURLOPT_WRITEDATA, state);
 
-    curl_easy_setopt(handle, CURLOPT_HEADERFUNCTION,
-      (header_callback)[](char *buffer, size_t size, size_t nmemb, void *userp)->size_t
-    {
-      auto state = static_cast<promise_t<http_response_t>::state_type*>(userp);
-      state->_value.headers.push_back(std::string(buffer, buffer + size * nmemb));
-      return size * nmemb;
-    });
+    curl_easy_setopt(
+        handle, CURLOPT_HEADERFUNCTION,
+        (header_callback)[](char* buffer, size_t size, size_t nmemb,
+                            void* userp)
+            ->size_t {
+              auto state =
+                  static_cast<promise_t<http_response_t>::state_type*>(userp);
+              state->_value.headers.push_back(
+                  std::string(buffer, buffer + size * nmemb));
+              return size * nmemb;
+            });
     curl_easy_setopt(handle, CURLOPT_HEADERDATA, state);
 
     curl_easy_setopt(handle, CURLOPT_PRIVATE, state);
@@ -259,7 +273,7 @@ struct curl_requester_t
     return promise.get_future();
   }
 
-  future_t<http_response_t> invoke(const char *url)
+  future_t<http_response_t> invoke(const char* url)
   {
     auto handle = curl_easy_init();
     curl_easy_setopt(handle, CURLOPT_URL, url);
@@ -272,4 +286,4 @@ struct curl_requester_t
   }
 };
 
-} // namespace
+} // namespace awaitcurl

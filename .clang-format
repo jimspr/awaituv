@@ -1,0 +1,92 @@
+---
+# ClangFormat rules for awaituv.
+Language:                                   Cpp
+AccessModifierOffset:                       -2
+AlignAfterOpenBracket:                      Align
+AlignConsecutiveAssignments:                false
+AlignConsecutiveDeclarations:               true
+AlignEscapedNewlines:                       DontAlign
+AlignOperands:                              true
+AlignTrailingComments:                      true
+AllowAllParametersOfDeclarationOnNextLine:  false
+AllowShortBlocksOnASingleLine:              false
+AllowShortCaseLabelsOnASingleLine:          false
+AllowShortFunctionsOnASingleLine:           Empty
+AllowShortIfStatementsOnASingleLine:        false
+AllowShortLoopsOnASingleLine:               false
+AlwaysBreakAfterReturnType:                 None
+AlwaysBreakBeforeMultilineStrings:          false
+AlwaysBreakTemplateDeclarations:            true
+BinPackArguments:                           true
+BinPackParameters:                          false
+BraceWrapping:
+  AfterClass:                               false
+  AfterControlStatement:                    false
+  AfterEnum:                                false
+  AfterFunction:                            true
+  AfterNamespace:                           false
+  AfterStruct:                              false
+  AfterUnion:                               false
+  AfterExternBlock:                         true
+  BeforeCatch:                              false
+  BeforeElse:                               false
+  IndentBraces:                             false
+  SplitEmptyFunction:                       false
+  SplitEmptyRecord:                         false
+  SplitEmptyNamespace:                      true
+BreakBeforeBinaryOperators:                 None
+BreakBeforeBraces:                          Custom
+BreakBeforeInheritanceComma:                false
+BreakBeforeTernaryOperators:                false
+BreakConstructorInitializers:               BeforeColon
+BreakStringLiterals:                        false
+ColumnLimit:                                79
+CommentPragmas:                             ''
+CompactNamespaces:                          false
+ConstructorInitializerAllOnOneLineOrOnePerLine: false
+ConstructorInitializerIndentWidth:          2
+ContinuationIndentWidth:                    4
+Cpp11BracedListStyle:                       false
+DerivePointerAlignment:                     false
+DisableFormat:                              false
+ExperimentalAutoDetectBinPacking:           false
+FixNamespaceComments:                       true
+ForEachMacros:                              []
+IncludeBlocks:                              Preserve
+IncludeCategories:                          []
+IncludeIsMainRegex:                         ''
+IndentCaseLabels:                           false
+IndentPPDirectives:                         None
+IndentWidth:                                2
+IndentWrappedFunctionNames:                 false
+KeepEmptyLinesAtTheStartOfBlocks:           false
+MacroBlockBegin:                            ''
+MacroBlockEnd:                              ''
+MaxEmptyLinesToKeep:                        2
+NamespaceIndentation:                       None
+PenaltyBreakAssignment:                     2
+PenaltyBreakBeforeFirstCallParameter:       19
+PenaltyBreakComment:                        300
+PenaltyBreakFirstLessLess:                  120
+PenaltyBreakString:                         1000
+PenaltyExcessCharacter:                     1000000
+PenaltyReturnTypeOnItsOwnLine:              1000
+PointerAlignment:                           Left
+RawStringFormats:                           []
+ReflowComments:                             true
+SortIncludes:                               true
+SortUsingDeclarations:                      true
+SpaceAfterCStyleCast:                       false
+SpaceAfterTemplateKeyword:                  true
+SpaceBeforeAssignmentOperators:             true
+SpaceBeforeParens:                          ControlStatements
+SpaceInEmptyParentheses:                    false
+SpacesBeforeTrailingComments:               1
+SpacesInAngles:                             false
+SpacesInCStyleCastParentheses:              false
+SpacesInParentheses:                        false
+SpacesInSquareBrackets:                     false
+Standard:                                   Cpp11
+TabWidth:                                   8
+UseTab:                                     Never
+...
