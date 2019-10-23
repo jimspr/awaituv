@@ -28,6 +28,8 @@ struct future_exception : std::exception {
 };
 
 struct awaitable_state_base {
+  // _on_await is used when we want to run code after co_await has started
+  std::function<void(void)> _on_await;
   std::function<void(void)> _coro;
   bool                      _ready = false;
   bool                      _future_acquired = false;
@@ -42,6 +44,14 @@ struct awaitable_state_base {
     assert(((cb == nullptr) || (_coro == nullptr)) &&
            "This future is already being awaited.");
     _coro = cb;
+  }
+
+  void execute_on_await()
+  {
+    auto on_await = _on_await;
+    _on_await = nullptr;
+    if (on_await != nullptr)
+      on_await();
   }
 
   void set_value()
@@ -272,6 +282,7 @@ struct future_t {
   void await_suspend(std::experimental::coroutine_handle<> resume_cb)
   {
     _state->set_coroutine_callback(resume_cb);
+    _state->execute_on_await();
   }
 
   bool ready() const
@@ -321,9 +332,11 @@ struct promise_t {
     return future_type(_state);
   }
 
-  std::experimental::suspend_never initial_suspend() const
+  std::experimental::suspend_if initial_suspend() const
   {
-    return {};
+    // Suspend if _on_await has something in it.
+    bool suspend = _state->_on_await != nullptr;
+    return std::experimental::suspend_if{ suspend };
   }
 
   std::experimental::suspend_never final_suspend() const
@@ -539,8 +552,10 @@ class loop_t : public ::uv_loop_t {
   int status = -1;
 
 public:
-  loop_t& operator=(const loop_t&) = delete; // no copy
-  loop_t()
+  // No copy, move already prevented by dtor
+  loop_t(const loop_t&) = delete;
+  loop_t& operator=(const loop_t&) = delete;
+  loop_t() : ::uv_loop_t{ 0 }
   {
     status = uv_loop_init(this);
     if (status != 0)
@@ -548,8 +563,7 @@ public:
   }
   ~loop_t()
   {
-    if (status == 0)
-      uv_loop_close(this);
+    close();
   }
   int run()
   {
@@ -559,14 +573,26 @@ public:
   {
     return uv_run(this, mode);
   }
+  void close()
+  {
+    if (status == 0)
+      uv_loop_close(this);
+    status = -1;
+  }
 };
 
 // Simple RAII for uv_fs_t type
 struct fs_t : public ::uv_fs_t {
+  fs_t() : ::uv_fs_t{ 0 }
+  {
+  }
   ~fs_t()
   {
     ::uv_fs_req_cleanup(this);
   }
+  // No copy, move already prevented by dtor
+  fs_t(const fs_t&) = delete;
+  fs_t& operator=(const fs_t&) = delete;
 };
 
 // Fixed size buffer
@@ -617,6 +643,20 @@ auto ref(
     typename std::enable_if<is_uv_handle_t<T>::value>::type* dummy = nullptr)
 {
   uv_ref(reinterpret_cast<uv_handle_t*>(handle));
+}
+
+/* switch_to_loop_thread must be called on a thread other than the loop thread
+   or this function will hang. */
+inline auto switch_to_loop_thread(uv_async_t* req, uv_loop_t* loop)
+{
+  promise_t<void> awaitable;
+  auto            state = awaitable._state->lock();
+  req->data = state;
+  /* We have to run this lazily (i.e. after suspension) or the async could
+     complete before the caller starts awaiting, which would NOT actually
+     result in resuming on the loop thread. */
+  state->_on_await = [=]() { uv_async_send(req); };
+  return awaitable.get_future();
 }
 
 inline auto fs_open(uv_loop_t*  loop,
@@ -974,6 +1014,80 @@ inline auto& tcp_connect(awaitable_state<int>&  awaitable,
 
   if (ret != 0)
     awaitable.set_value(ret);
+  return awaitable;
+}
+
+inline auto pipe_connect(uv_connect_t* req,
+                         uv_pipe_t*    handle,
+                         const char*   name)
+{
+  promise_t<int> awaitable;
+  auto           state = awaitable._state->lock();
+  req->data = state;
+
+  (void)::uv_pipe_connect(
+      req, handle, name, [](uv_connect_t* req, int status) -> void {
+        auto state = static_cast<promise_t<int>::state_type*>(req->data);
+        state->set_value(status);
+        state->unlock();
+      });
+
+  return awaitable.get_future();
+}
+
+inline auto& pipe_connect(awaitable_state<int>& awaitable,
+                          uv_connect_t*         req,
+                          uv_pipe_t*            handle,
+                          const char*           name)
+{
+  req->data = &awaitable;
+
+  (void)::uv_pipe_connect(
+      req, handle, name, [](uv_connect_t* req, int status) -> void {
+        auto state = static_cast<awaitable_state<int>*>(req->data);
+        state->set_value(status);
+      });
+
+  return awaitable;
+}
+
+inline auto listen(uv_stream_t* stream, int backlog)
+{
+  promise_t<int> awaitable;
+  auto           state = awaitable._state->lock();
+  stream->data = state;
+
+  int ret =
+      ::uv_listen(stream, backlog, [](uv_stream_t* req, int status) -> void {
+        auto state = static_cast<promise_t<int>::state_type*>(req->data);
+        state->set_value(status);
+        state->unlock();
+      });
+
+  if (ret != 0) {
+    state->set_value(ret);
+    state->unlock();
+  }
+
+  return awaitable.get_future();
+}
+
+inline auto& listen(awaitable_state<int>& awaitable,
+                    uv_stream_t*          stream,
+                    int                   backlog)
+{
+  stream->data = &awaitable;
+
+  int ret =
+      ::uv_listen(stream, backlog, [](uv_stream_t* req, int status) -> void {
+        auto state = static_cast<awaitable_state<int>*>(req->data);
+        state->set_value(status);
+      });
+
+  if (ret != 0) {
+    awaitable.set_value(ret);
+  }
+
   return awaitable;
 }
 
