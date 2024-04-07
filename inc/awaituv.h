@@ -10,11 +10,7 @@
 #include <uv.h> // libuv
 #include <vector>
 
-#if __has_include(<experimental/coroutine>)
-#include <experimental/coroutine>
-#else
-#include <experimental\resumable>
-#endif
+#include <coroutine>
 
 namespace awaituv {
 enum struct future_error {
@@ -82,7 +78,7 @@ struct awaitable_state_base {
     return _ready;
   }
 
-  void await_suspend(std::experimental::coroutine_handle<> resume_cb)
+  void await_suspend(std::coroutine_handle<> resume_cb)
   {
     set_coroutine_callback(resume_cb);
   }
@@ -142,10 +138,7 @@ template <typename awaitable_state_t>
 struct counted_awaitable_state : public awaitable_state_t {
   std::atomic<int> _count{ 0 }; // tracks reference count of state object
 
-  template <typename... Args>
-  counted_awaitable_state(Args&&... args)
-    : _count{ 0 }, awaitable_state_t(std::forward<Args>(args)...)
-  {}
+  counted_awaitable_state() {}
   counted_awaitable_state(const counted_awaitable_state&) = delete;
   counted_awaitable_state(counted_awaitable_state&&) = delete;
 
@@ -239,10 +232,11 @@ protected:
   counted_awaitable_state<T>* _p = nullptr;
 };
 
-template <typename T, typename... Args>
-counted_ptr<T> make_counted(Args&&... args)
+template <typename T>
+counted_ptr<T> make_counted()
 {
-  return new counted_awaitable_state<T>{ std::forward<Args>(args)... };
+  auto state = new counted_awaitable_state<T>{};
+  return state;
 }
 
 // The awaitable_state class is good enough for most cases, however there are
@@ -279,7 +273,7 @@ struct future_t {
     return _state->_ready;
   }
 
-  void await_suspend(std::experimental::coroutine_handle<> resume_cb)
+  void await_suspend(std::coroutine_handle<> resume_cb)
   {
     _state->set_coroutine_callback(resume_cb);
     _state->execute_on_await();
@@ -303,10 +297,7 @@ struct promise_t {
   counted_ptr<state_t>                     _state;
 
   // movable not copyable
-  template <typename... Args>
-  promise_t(Args&&... args)
-    : _state(make_counted<state_t>(std::forward<Args>(args)...))
-  {}
+  promise_t() : _state(make_counted<state_t>()) {}
   promise_t(const promise_t&) = delete;
   promise_t(promise_t&&) = default;
 
@@ -332,14 +323,15 @@ struct promise_t {
     return future_type(_state);
   }
 
-  std::experimental::suspend_if initial_suspend() const
+  std::suspend_always initial_suspend() const
   {
     // Suspend if _on_await has something in it.
-    bool suspend = _state->_on_await != nullptr;
-    return std::experimental::suspend_if{ suspend };
+    // bool suspend = _state->_on_await != nullptr;
+    // return std::suspend_if{ suspend };
+    return {};
   }
 
-  std::experimental::suspend_never final_suspend() const
+  std::suspend_never final_suspend() const noexcept
   {
     return {};
   }
@@ -362,10 +354,7 @@ struct promise_t<void, state_t> {
   counted_ptr<state_t>                     _state;
 
   // movable not copyable
-  template <typename... Args>
-  promise_t(Args&&... args)
-    : _state(make_counted<state_t>(std::forward<Args>(args)...))
-  {}
+  promise_t() : _state(make_counted<state_t>()) {}
   promise_t(const promise_t&) = delete;
   promise_t(promise_t&&) = default;
 
@@ -379,12 +368,12 @@ struct promise_t<void, state_t> {
     return future_type(_state);
   }
 
-  std::experimental::suspend_never initial_suspend() const
+  std::suspend_never initial_suspend() const
   {
     return {};
   }
 
-  std::experimental::suspend_never final_suspend() const
+  std::suspend_never final_suspend() const noexcept
   {
     return {};
   }
@@ -422,9 +411,9 @@ template <typename Iterator>
 auto future_of_all_range(Iterator begin, Iterator end)
     -> future_t<std::vector<decltype(begin->await_resume())>>
 {
-  std::vector<decltype(co_await * begin)> vec;
+  std::vector<decltype(co_await *begin)> vec;
   while (begin != end) {
-    vec.push_back(co_await * begin);
+    vec.push_back(co_await *begin);
     ++begin;
   }
   co_return vec;
@@ -435,7 +424,7 @@ auto future_of_all_range(Iterator begin, Iterator end)
 {
   std::vector<typename decltype(*begin)::type> vec;
   while (begin != end) {
-    vec.push_back(co_await * begin);
+    vec.push_back(co_await *begin);
     ++begin;
   }
   co_return vec;
@@ -448,7 +437,7 @@ template <typename tuple_t, size_t N>
 struct coro_helper_t {
   static void set(tuple_t& tuple, std::function<void(void)> cb)
   {
-    std::get<N>(tuple)._state->set_coroutine_callback(cb);
+    std::get<N>(tuple)->_state->set_coroutine_callback(cb);
     coro_helper_t<tuple_t, N - 1>::set(tuple, cb);
   }
 };
@@ -457,7 +446,7 @@ template <typename tuple_t>
 struct coro_helper_t<tuple_t, 0> {
   static void set(tuple_t& tuple, std::function<void(void)> cb)
   {
-    std::get<0>(tuple)._state->set_coroutine_callback(cb);
+    std::get<0>(tuple)->_state->set_coroutine_callback(cb);
   }
 };
 
@@ -471,8 +460,13 @@ void set_coro_helper(tuple_t& tuple, std::function<void(void)> cb)
 template <typename... Rest>
 struct multi_awaitable_state : public awaitable_state<void> {
   // Store references to all the futures passed in.
-  std::tuple<Rest&...> _futures;
-  multi_awaitable_state(Rest&... args) : _futures(args...) {}
+  std::tuple<Rest*...> _futures;
+  multi_awaitable_state() {}
+
+  void set_args(Rest&&... args)
+  {
+    _futures = std::tuple<Rest*...>{ &args... };
+  }
 
   void set_coroutine_callback(std::function<void(void)> cb)
   {
@@ -491,7 +485,8 @@ template <typename T, typename... Rest>
 future_t<void, multi_awaitable_state<T, Rest...>> future_of_any(T& f,
                                                                 Rest&... args)
 {
-  promise_t<void, multi_awaitable_state<T, Rest...>> promise(f, args...);
+  promise_t<void, multi_awaitable_state<T, Rest...>> promise;
+  promise._state->set_args(std::forward<T>(f), std::forward<Rest>(args)...);
   return promise.get_future();
 }
 
@@ -583,9 +578,7 @@ public:
 
 // Simple RAII for uv_fs_t type
 struct fs_t : public ::uv_fs_t {
-  fs_t() : ::uv_fs_t{ 0 }
-  {
-  }
+  fs_t() : ::uv_fs_t{ 0 } {}
   ~fs_t()
   {
     ::uv_fs_req_cleanup(this);

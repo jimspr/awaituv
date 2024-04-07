@@ -1,4 +1,4 @@
-// TestUV.cpp : Defines the entry point for the console application.
+// Test5.cpp : Defines the entry point for the console application.
 //
 
 #include <awaituv.h>
@@ -53,25 +53,19 @@ future_t<void> start_http_google()
       }
     }
     awaitable_state<void> closestate;
-    co_await              close(closestate, &socket);
+    co_await close(closestate, &socket);
   }
 }
 
 future_t<void> test5()
 {
-  auto     f1 = start_http_google();
-  auto     f2 = start_http_google();
+  auto f1 = start_http_google();
+  auto f2 = start_http_google();
   co_await future_of_any(f1, f2);
 }
 
 int main(int argc, char* argv[])
 {
-  // Process command line
-  if (argc == 1) {
-    printf("testuv");
-    return -1;
-  }
-
   test5();
   uv_run(uv_default_loop(), UV_RUN_DEFAULT);
 

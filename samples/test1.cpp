@@ -1,4 +1,4 @@
-// TestUV.cpp : Defines the entry point for the console application.
+// Test1.cpp : Defines the entry point for the console application.
 //
 
 #include <awaituv.h>
@@ -106,22 +106,22 @@ future_t<void> start_dump_file(const std::string& str)
   // overlap.
   static_buf_t<1024> buffer;
 
-  fs_t         openreq;
-  uv_file      file =
+  fs_t    openreq;
+  uv_file file =
       co_await fs_open(uv_default_loop(), &openreq, str.c_str(), O_RDONLY, 0);
   if (file > 0) {
     while (1) {
-      fs_t         readreq;
-      int          result =
+      fs_t readreq;
+      int  result =
           co_await fs_read(uv_default_loop(), &readreq, file, &buffer, 1, -1);
       if (result <= 0)
         break;
       buffer.len = result;
-      fs_t           req;
+      fs_t req;
       (void)co_await fs_write(uv_default_loop(), &req, 1 /*stdout*/, &buffer,
                               1, -1);
     }
-    fs_t           closereq;
+    fs_t closereq;
     (void)co_await fs_close(uv_default_loop(), &closereq, file);
   }
 }
@@ -129,8 +129,8 @@ future_t<void> start_dump_file(const std::string& str)
 future_t<void> start_hello_world()
 {
   for (int i = 0; i < 1000; ++i) {
-    string_buf_t   buf("\nhello world\n");
-    fs_t           req;
+    string_buf_t buf("\nhello world\n");
+    fs_t         req;
     (void)co_await fs_write(uv_default_loop(), &req, 1 /*stdout*/, &buf, 1,
                             -1);
   }
@@ -140,7 +140,7 @@ int main(int argc, char* argv[])
 {
   // Process command line
   if (argc == 1) {
-    printf("testuv [--sequential] <file1> <file2> ...");
+    printf("test1 [--sequential] <file1> <file2> ...");
     return -1;
   }
 
