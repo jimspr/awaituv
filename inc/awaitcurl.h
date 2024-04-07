@@ -31,8 +31,8 @@ struct curl_global_t {
 
 // Basis http response type
 struct http_response_t {
-  long                     http_code;
-  CURLcode                 curl_code;
+  long                     http_code{ 0 };
+  CURLcode                 curl_code{ CURLE_OK };
   std::string              str;
   std::vector<std::string> headers;
 
@@ -84,7 +84,7 @@ struct curl_requester_t {
                                  int           action,
                                  void*         userp,
                                  void*         socketp);
-  typedef void (*timer_callback)(CURLM* multi, long timeout_ms, void* userp);
+  typedef int (*timer_callback)(CURLM* multi, long timeout_ms, void* userp);
 
   uv_loop_t& loop;
   CURLM*     multi_handle;
@@ -111,9 +111,9 @@ struct curl_requester_t {
     curl_multi_setopt(multi_handle, CURLMOPT_TIMERDATA, this);
     curl_multi_setopt(
         multi_handle, CURLMOPT_TIMERFUNCTION,
-        (timer_callback)[](CURLM * multi, long timeout_ms, void* userp)->void {
+        (timer_callback)[](CURLM * multi, long timeout_ms, void* userp)->int {
           auto requester = static_cast<curl_requester_t*>(userp);
-          requester->timer_function(multi, timeout_ms);
+          return requester->timer_function(multi, timeout_ms);
         });
   }
 
@@ -209,18 +209,11 @@ struct curl_requester_t {
   }
 
   // This is called for CURLMOPT_TIMERFUNCTION
-  void timer_function(CURLM* multi, long timeout_ms)
+  int timer_function(CURLM* multi, long timeout_ms)
   {
     if (timeout_ms == -1) // delete timer
       uv_timer_stop(&timeout);
-    else if (timeout_ms == 0) // process immediately
-    {
-      int running_handles;
-      curl_multi_socket_action(multi_handle, CURL_SOCKET_TIMEOUT, 0,
-                               &running_handles);
-      process_messages();
-    } else // set a timer to process in the future
-    {
+    else {
       uv_timer_start(
           &timeout,
           [](uv_timer_t* req) -> void {
@@ -232,6 +225,7 @@ struct curl_requester_t {
           },
           timeout_ms, 0);
     }
+    return 0;
   }
 
   future_t<http_response_t> invoke(CURL* handle)

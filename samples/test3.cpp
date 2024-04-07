@@ -11,8 +11,8 @@ using namespace awaitcurl;
 future_t<void> test3(curl_requester_t& requester)
 {
   auto resourcetype = "pet";
-  auto resourcelink = "pet/51231236";
-  auto url = std::string{ "http://petstore.swagger.io/v2/" } + resourcelink;
+  auto resourcelink = "pet/1";
+  auto url = std::string{ "https://petstore.swagger.io/v2/" } + resourcelink;
 
   struct curl_slist* headers = nullptr;
   headers = curl_slist_append(headers, "Accept: application/json");
@@ -27,19 +27,19 @@ future_t<void> test3(curl_requester_t& requester)
   auto result = co_await requester.invoke(curl);
   if (result.curl_code == CURLE_OK) {
     sprintf(buffer, "http_code: %ld\n", result.http_code);
-    string_buf_t   buf{ buffer, strlen(buffer) };
-    fs_t           writereq;
+    string_buf_t buf{ buffer, strlen(buffer) };
+    fs_t         writereq;
     (void)co_await fs_write(uv_default_loop(), &writereq, 1 /*stdout*/, &buf,
                             1, -1);
 
-    auto&          str = result.str;
-    string_buf_t   buf2{ str.c_str(), str.size() };
+    auto&        str = result.str;
+    string_buf_t buf2{ str.c_str(), str.size() };
     (void)co_await fs_write(uv_default_loop(), &writereq, 1 /*stdout*/, &buf2,
                             1, -1);
   } else {
     sprintf(buffer, "failed %d\n", result.curl_code);
-    string_buf_t   buf{ buffer, strlen(buffer) };
-    fs_t           writereq;
+    string_buf_t buf{ buffer, strlen(buffer) };
+    fs_t         writereq;
     (void)co_await fs_write(uv_default_loop(), &writereq, 1 /*stdout*/, &buf,
                             1, -1);
   }

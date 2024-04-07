@@ -1,4 +1,4 @@
-// TestUV.cpp : Defines the entry point for the console application.
+// Test2.cpp : Defines the entry point for the console application.
 //
 
 #include <awaituv.h>
@@ -36,23 +36,23 @@ future_t<void> start_color_changer()
 
     if (++cnt % 2 == 0) {
       awaitable_state<int> writestate;
-      (void)co_await       write(writestate, &writereq,
-                                 reinterpret_cast<uv_stream_t*>(&tty), &normal, 1);
+      (void)co_await write(writestate, &writereq,
+                           reinterpret_cast<uv_stream_t*>(&tty), &normal, 1);
     } else {
       awaitable_state<int> writestate;
-      (void)co_await       write(writestate, &writereq,
-                                 reinterpret_cast<uv_stream_t*>(&tty), &red, 1);
+      (void)co_await write(writestate, &writereq,
+                           reinterpret_cast<uv_stream_t*>(&tty), &red, 1);
     }
   }
 
   // reset back to normal
   awaitable_state<int> writestate;
-  (void)co_await       write(writestate, &writereq,
-                             reinterpret_cast<uv_stream_t*>(&tty), &normal, 1);
+  (void)co_await write(writestate, &writereq,
+                       reinterpret_cast<uv_stream_t*>(&tty), &normal, 1);
 
   uv_tty_reset_mode();
   awaitable_state<void> closestate;
-  co_await              close(closestate, &tty);
+  co_await close(closestate, &tty);
   closestate.reset();
   co_await close(closestate, &color_timer); // close handle
 }
@@ -108,7 +108,7 @@ future_t<void> start_http_google()
       }
     }
     awaitable_state<void> closestate;
-    co_await              close(closestate, &socket);
+    co_await close(closestate, &socket);
   }
 }
 
@@ -133,7 +133,7 @@ future_t<void> start_dump_file(const std::string& str)
       buffer.len = result;
       fs_t                 req;
       awaitable_state<int> writestate;
-      (void)co_await       fs_write(writestate, uv_default_loop(), &req,
+      (void)co_await fs_write(writestate, uv_default_loop(), &req,
                               1 /*stdout*/, &buffer, 1, -1);
     }
     fs_t                 closereq;
@@ -157,7 +157,7 @@ int main(int argc, char* argv[])
 {
   // Process command line
   if (argc == 1) {
-    printf("testuv [--sequential] <file1> <file2> ...");
+    printf("test2 [--sequential] <file1> <file2> ...");
     return -1;
   }
 
