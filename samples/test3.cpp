@@ -11,7 +11,7 @@ using namespace awaitcurl;
 future_t<void> test3(curl_requester_t& requester)
 {
   auto resourcetype = "pet";
-  auto resourcelink = "pet/1";
+  auto resourcelink = "pet/2";
   auto url = std::string{ "https://petstore.swagger.io/v2/" } + resourcelink;
 
   struct curl_slist* headers = nullptr;

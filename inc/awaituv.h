@@ -23,6 +23,18 @@ struct future_exception : std::exception {
   future_exception(future_error fe) : _error(fe) {}
 };
 
+struct suspend_if {
+  bool _suspend;
+
+  constexpr bool await_ready() const noexcept
+  {
+    return !_suspend;
+  }
+
+  constexpr void await_suspend(std::coroutine_handle<>) const noexcept {}
+  constexpr void await_resume() const noexcept {}
+};
+
 struct awaitable_state_base {
   // _on_await is used when we want to run code after co_await has started
   std::function<void(void)> _on_await;
@@ -323,12 +335,13 @@ struct promise_t {
     return future_type(_state);
   }
 
-  std::suspend_always initial_suspend() const
+  suspend_if initial_suspend() const
   {
     // Suspend if _on_await has something in it.
-    // bool suspend = _state->_on_await != nullptr;
-    // return std::suspend_if{ suspend };
-    return {};
+    // This suspends the coroutine immediately and won't execute anything in it
+    // until co_await.
+    bool suspend = _state->_on_await != nullptr;
+    return suspend_if{ suspend };
   }
 
   std::suspend_never final_suspend() const noexcept
@@ -368,9 +381,13 @@ struct promise_t<void, state_t> {
     return future_type(_state);
   }
 
-  std::suspend_never initial_suspend() const
+  suspend_if initial_suspend() const
   {
-    return {};
+    // Suspend if _on_await has something in it.
+    // This suspends the coroutine immediately and won't execute anything in it
+    // until co_await.
+    bool suspend = _state->_on_await != nullptr;
+    return suspend_if{ suspend };
   }
 
   std::suspend_never final_suspend() const noexcept
