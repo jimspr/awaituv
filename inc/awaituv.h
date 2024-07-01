@@ -12,18 +12,11 @@
 
 #include <coroutine>
 
-namespace awaituv {
-enum struct future_error {
-  not_ready,       // get_value called when value not available
-  already_acquired // attempt to get another future
-};
+namespace awaituv
+{
 
-struct future_exception : std::exception {
-  future_error _error;
-  future_exception(future_error fe) : _error(fe) {}
-};
-
-struct suspend_if {
+struct suspend_if
+{
   bool _suspend;
 
   constexpr bool await_ready() const noexcept
@@ -35,22 +28,19 @@ struct suspend_if {
   constexpr void await_resume() const noexcept {}
 };
 
-struct awaitable_state_base {
-  // _on_await is used when we want to run code after co_await has started
-  std::function<void(void)> _on_await;
-  std::function<void(void)> _coro;
+// awaitable_state_base holds some simple stuff that all awaitables here
+// are based// on.
+struct awaitable_state_base
+{
+  std::function<void(void)> _on_await = nullptr;
+  std::function<void(void)> _coro = nullptr;
   bool                      _ready = false;
-  bool                      _future_acquired = false;
 
-  awaitable_state_base() = default;
-  awaitable_state_base(awaitable_state_base&&) = delete;
-  awaitable_state_base(const awaitable_state_base&) = delete;
-
-  void set_coroutine_callback(std::function<void(void)> cb)
+  // set_callback is used by multi_awaitable
+  void set_callback(std::function<void(void)> cb)
   {
     // Test to make sure nothing else is waiting on this future.
-    assert(((cb == nullptr) || (_coro == nullptr)) &&
-           "This future is already being awaited.");
+    assert(((cb == nullptr) || (_coro == nullptr)) && "This awaitable is already being awaited.");
     _coro = cb;
   }
 
@@ -72,19 +62,13 @@ struct awaitable_state_base {
       coro();
   }
 
-  bool ready() const
-  {
-    return _ready;
-  }
-
   void reset()
   {
     _coro = nullptr;
     _ready = false;
-    _future_acquired = false;
   }
 
-  // functions that make this directly awaitable
+  // functions that make this awaitable
   bool await_ready() const
   {
     return _ready;
@@ -92,30 +76,42 @@ struct awaitable_state_base {
 
   void await_suspend(std::coroutine_handle<> resume_cb)
   {
-    set_coroutine_callback(resume_cb);
+    set_callback(resume_cb);
   }
 };
 
+/*
+  awaitable_state is used to return an awaitable type from a function
+  that is not itself a coroutine (i.e. it doesn't use
+  co_await/co_return/co_yield) The awaitable_state object is allocated outside
+  of the function and passed in and then returned by reference from the
+  function. This state provides a location for the eventual value to be stored.
+  Returning it from the function allows the function to be directly
+  co_await'ed.
+*/
 template <typename T>
-struct awaitable_state : public awaitable_state_base {
+struct awaitable_state : public awaitable_state_base
+{
   T _value;
 
+  awaitable_state() = default;
+  // movable, but not copyable
+  awaitable_state(const awaitable_state&) = delete;
+  awaitable_state& operator=(const awaitable_state&) = delete;
+  awaitable_state(awaitable_state&& f) = default;
+  awaitable_state& operator=(awaitable_state&&) = default;
+
+  using awaitable_state_base::set_value;
   void set_value(const T& t)
   {
     _value = t;
-    awaitable_state_base::set_value();
+    set_value();
   }
 
-  void finalize_value()
+  void set_value(T&& t)
   {
+    std::swap(_value, t);
     awaitable_state_base::set_value();
-  }
-
-  auto get_value()
-  {
-    if (!_ready)
-      throw future_exception{ future_error::not_ready };
-    return _value;
   }
 
   void reset()
@@ -124,458 +120,388 @@ struct awaitable_state : public awaitable_state_base {
     _value = T{};
   }
 
-  // make this directly awaitable
+  // functions that make this awaitable
   auto await_resume() const
   {
     return _value;
+  }
+
+  T&& await_resume()
+  {
+    return std::move(_value);
   }
 };
 
 // specialization of awaitable_state<void>
 template <>
-struct awaitable_state<void> : public awaitable_state_base {
-  void get_value() const
-  {
-    if (!_ready)
-      throw future_exception{ future_error::not_ready };
-  }
+struct awaitable_state<void> : public awaitable_state_base
+{
+  awaitable_state() = default;
+  awaitable_state(awaitable_state&&) = delete;
+  awaitable_state(const awaitable_state&) = delete;
 
-  // make this directly awaitable
+  // functions that make this awaitable
   void await_resume() const {}
 };
 
-// We need to be able to manage reference count of the state object in the
-// callback.
-template <typename awaitable_state_t>
-struct counted_awaitable_state : public awaitable_state_t {
-  std::atomic<int> _count{ 0 }; // tracks reference count of state object
-
-  counted_awaitable_state() {}
-  counted_awaitable_state(const counted_awaitable_state&) = delete;
-  counted_awaitable_state(counted_awaitable_state&&) = delete;
-
-  counted_awaitable_state* lock()
-  {
-    ++_count;
-    return this;
-  }
-
-  void unlock()
-  {
-    if (--_count == 0)
-      delete this;
-  }
-
-protected:
-  ~counted_awaitable_state() {}
-};
-
-// counted_ptr is similar to shared_ptr but allows explicit control
-//
 template <typename T>
-struct counted_ptr {
-  counted_ptr() = default;
-  counted_ptr(const counted_ptr& cp) : _p(cp._p)
-  {
-    _lock();
-  }
-
-  counted_ptr(counted_awaitable_state<T>* p) : _p(p)
-  {
-    _lock();
-  }
-
-  counted_ptr(counted_ptr&& cp)
-  {
-    std::swap(_p, cp._p);
-  }
-
-  counted_ptr& operator=(const counted_ptr& cp)
-  {
-    if (&cp != this) {
-      _unlock();
-      _lock(cp._p);
-    }
-    return *this;
-  }
-
-  counted_ptr& operator=(counted_ptr&& cp)
-  {
-    if (&cp != this)
-      std::swap(_p, cp._p);
-    return *this;
-  }
-
-  ~counted_ptr()
-  {
-    _unlock();
-  }
-
-  counted_awaitable_state<T>* operator->() const
-  {
-    return _p;
-  }
-
-  counted_awaitable_state<T>* get() const
-  {
-    return _p;
-  }
-
-protected:
-  void _unlock()
-  {
-    if (_p != nullptr) {
-      auto t = _p;
-      _p = nullptr;
-      t->unlock();
-    }
-  }
-  void _lock(counted_awaitable_state<T>* p)
-  {
-    if (p != nullptr)
-      p->lock();
-    _p = p;
-  }
-  void _lock()
-  {
-    if (_p != nullptr)
-      _p->lock();
-  }
-  counted_awaitable_state<T>* _p = nullptr;
-};
-
-template <typename T>
-counted_ptr<T> make_counted()
+struct awaitable_t : public awaitable_state_base
 {
-  auto state = new counted_awaitable_state<T>{};
-  return state;
-}
-
-// The awaitable_state class is good enough for most cases, however there are
-// some cases where a libuv callback returns more than one "value".  In that
-// case, the function can define its own state type that holds more
-// information.
-template <typename T, typename state_t = awaitable_state<T>>
-struct promise_t;
-
-template <typename T, typename state_t = awaitable_state<T>>
-struct future_t {
-  typedef T                     type;
-  typedef promise_t<T, state_t> promise_type;
-  counted_ptr<state_t>          _state;
-
-  future_t(const counted_ptr<state_t>& state) : _state(state)
+  struct promise_type
   {
-    _state->_future_acquired = true;
+    T            _value = {};
+    bool         _ready = false;
+    awaitable_t* _awaitable = nullptr; // points to one and only future_t
+
+    awaitable_t<T> get_return_object()
+    {
+      assert(_awaitable == nullptr);
+      return awaitable_t<T>(*this);
+    }
+
+    template <typename X>
+    void return_value(const X& val, typename std::is_assignable<T, X>::type* = nullptr)
+    {
+      if (_awaitable == nullptr)
+      {
+        _value = val;
+        _ready = true;
+      }
+      else
+        _awaitable->return_value_helper(val);
+    }
+
+    void return_value(T&& val)
+    {
+      if (_awaitable == nullptr)
+      {
+        std::swap(_value, val);
+        _ready = true;
+      }
+      else
+        _awaitable->return_value_helper(std::move(val));
+    }
+
+    suspend_if initial_suspend() const
+    {
+      // Suspend if _on_await has something in it.
+      // This suspends the coroutine immediately and won't execute anything in
+      // it until co_await.
+      bool suspend = _awaitable->_on_await != nullptr;
+      return suspend_if{ suspend };
+    }
+
+    std::suspend_never final_suspend() const noexcept
+    {
+      return {};
+    }
+    [[noreturn]] void unhandled_exception()
+    {
+      std::terminate();
+    }
+  };
+
+  const T& await_resume() const
+  {
+    return _value;
   }
 
-  // movable, but not copyable
-  future_t(const future_t&) = delete;
-  future_t& operator=(const future_t&) = delete;
-  future_t(future_t&& f) = default;
-  future_t& operator=(future_t&&) = default;
-
-  auto await_resume() const
+  T&& await_resume()
   {
-    return _state->get_value();
+    return std::move(_value);
   }
 
-  bool await_ready() const
+  // forwarded from promise
+  template <typename X>
+  void return_value_helper(const X& val, typename std::is_assignable<T, X>::type* = nullptr)
   {
-    return _state->_ready;
+    _value = val;
+    set_value();
   }
 
-  void await_suspend(std::coroutine_handle<> resume_cb)
+  void return_value_helper(T&& val)
   {
-    _state->set_coroutine_callback(resume_cb);
-    _state->execute_on_await();
+    std::swap(_value, val);
+    set_value();
   }
 
-  bool ready() const
+  awaitable_t(promise_type& promise) : _promise(promise)
   {
-    return _state->_ready;
+    _promise._awaitable = this;
+    _ready = _promise._ready;
+    _value = std::move(_promise._value);
+  }
+  // move ctor, but nothing else
+  awaitable_t& operator=(const awaitable_t&) = delete;
+  awaitable_t(const awaitable_t&) = delete;
+  awaitable_t& operator=(awaitable_t&& f) = delete;
+  awaitable_t(awaitable_t&& f) : _promise(f._promise)
+  {
+    assert(f._coro == nullptr); // not awaited yet
+    _ready = f._ready;
+    _value = std::move(f._value);
+    _promise._awaitable = this;
   }
 
-  auto get_value() const
+  ~awaitable_t()
   {
-    return _state->get_value();
+    // If an awaitable has been created for a promise, but ultimately never
+    // fully awaited for, null out the awaitable back pointer when it goes
+    // away. This can happen when creating multiple awaitables but only waiting
+    // for one to complete (e.g. future_of_any).
+    _promise._awaitable = nullptr;
   }
+
+  promise_type& _promise;
+  T             _value = {};
 };
 
-template <typename T, typename state_t>
-struct promise_t {
-  typedef future_t<T, state_t>             future_type;
-  typedef counted_awaitable_state<state_t> state_type;
-  counted_ptr<state_t>                     _state;
-
-  // movable not copyable
-  promise_t() : _state(make_counted<state_t>()) {}
-  promise_t(const promise_t&) = delete;
-  promise_t(promise_t&&) = default;
-
-  future_type get_future()
+/*
+  The future_t class is used to return an awaitable from a function
+  that is itself a coroutine. The future_t/promise_type both provide
+  potential storage for the eventual value.
+  This allows two things:
+  1) The async operation can start(and finish) without waiting for co_await to
+  be called. 2) Avoids requiring the awaitable to ever be co_await'ed. Cleanup
+  still happens correctly. The awaitable is movable and whenever it is moved,
+  it updates the promise to point to itself. There can be only one awaitable
+  for a promise. Because libuv is single threaded, this is dramatically simpler
+  as we don't need to worry about races.
+*/
+template <>
+struct awaitable_t<void> : public awaitable_state_base
+{
+  struct promise_type
   {
-    if (_state->_future_acquired)
-      throw future_exception{ future_error::already_acquired };
-    return future_type(_state);
-  }
+    bool         _ready = false;
+    awaitable_t* _awaitable = nullptr; // points to one and only future_t
 
-  // Most functions don't need this but timers and reads from streams
-  // cause multiple callbacks.
-  future_type next_future()
-  {
-    // reset and return another future
-    if (_state->_future_acquired)
-      _state->reset();
-    return future_type(_state);
-  }
+    awaitable_t get_return_object()
+    {
+      assert(_awaitable == nullptr);
+      return awaitable_t(*this);
+    }
 
-  future_type get_return_object()
-  {
-    return future_type(_state);
-  }
+    void return_void()
+    {
+      if (_awaitable == nullptr)
+        _ready = true;
+      else
+        _awaitable->return_void();
+    }
 
-  suspend_if initial_suspend() const
-  {
-    // Suspend if _on_await has something in it.
-    // This suspends the coroutine immediately and won't execute anything in it
-    // until co_await.
-    bool suspend = _state->_on_await != nullptr;
-    return suspend_if{ suspend };
-  }
+    suspend_if initial_suspend() const
+    {
+      // Suspend if _on_await has something in it.
+      // This suspends the coroutine immediately and won't execute anything in
+      // it until co_await.
+      bool suspend = _awaitable->_on_await != nullptr;
+      return suspend_if{ suspend };
+    }
 
-  std::suspend_never final_suspend() const noexcept
-  {
-    return {};
-  }
+    std::suspend_never final_suspend() const noexcept
+    {
+      return {};
+    }
+    [[noreturn]] void unhandled_exception()
+    {
+      std::terminate();
+    }
+  };
 
-  void return_value(const T& val)
-  {
-    _state->set_value(val);
-  }
+  void await_resume() const {}
 
-  [[noreturn]] void unhandled_exception()
-  {
-    std::terminate();
-  }
-};
-
-template <typename state_t>
-struct promise_t<void, state_t> {
-  typedef future_t<void, state_t>          future_type;
-  typedef counted_awaitable_state<state_t> state_type;
-  counted_ptr<state_t>                     _state;
-
-  // movable not copyable
-  promise_t() : _state(make_counted<state_t>()) {}
-  promise_t(const promise_t&) = delete;
-  promise_t(promise_t&&) = default;
-
-  future_type get_future()
-  {
-    return future_type(_state);
-  }
-
-  future_type get_return_object()
-  {
-    return future_type(_state);
-  }
-
-  suspend_if initial_suspend() const
-  {
-    // Suspend if _on_await has something in it.
-    // This suspends the coroutine immediately and won't execute anything in it
-    // until co_await.
-    bool suspend = _state->_on_await != nullptr;
-    return suspend_if{ suspend };
-  }
-
-  std::suspend_never final_suspend() const noexcept
-  {
-    return {};
-  }
-
+  // forwarded from promise
   void return_void()
   {
-    _state->set_value();
+    set_value();
   }
 
-  [[noreturn]] void unhandled_exception()
+  awaitable_t(promise_type& promise) : _promise(promise)
   {
-    std::terminate();
+    _promise._awaitable = this;
+    _ready = _promise._ready;
   }
+  // move ctor, but nothing else
+  awaitable_t& operator=(const awaitable_t&) = delete;
+  awaitable_t& operator=(awaitable_t&&) = delete;
+  awaitable_t(const awaitable_t&) = delete;
+  awaitable_t(awaitable_t&& f) : _promise(f._promise)
+  {
+    assert(f._coro == nullptr); // not awaited yet
+    _ready = f._ready;
+    _promise._awaitable = this;
+  }
+
+  ~awaitable_t()
+  {
+    // If an awaitable has been created for a promise, but ultimately never
+    // fully awaited for, null out the awaitable back pointer when it goes
+    // away. This can happen when creating multiple awaitables but only waiting
+    // for one to complete (e.g. future_of_any).
+    _promise._awaitable = nullptr;
+  }
+
+  promise_type& _promise;
 };
 
 // future_of_all is pretty trivial as we can just await on each argument
-
 template <typename T>
-future_t<void> future_of_all(T& f)
+awaitable_t<void> future_of_all(T& f)
 {
   co_await f;
 }
 
 template <typename T, typename... Rest>
-future_t<void> future_of_all(T& f, Rest&... args)
+awaitable_t<void> future_of_all(T& f, Rest&... args)
 {
   co_await f;
   co_await future_of_all(args...);
 }
 
-// future_of_all_range can take a vector/array of futures, although
-// they must be of the same time. It returns a vector of all the results.
+// future_of_all_range will return a vector of results when all futures
+// complete
 template <typename Iterator>
-#ifdef _MSC_VER
 auto future_of_all_range(Iterator begin, Iterator end)
-    -> future_t<std::vector<decltype(begin->await_resume())>>
+    -> awaitable_t<std::vector<typename std::remove_reference<decltype(begin->await_resume())>::type>>
 {
-  std::vector<decltype(co_await *begin)> vec;
-  while (begin != end) {
-    vec.push_back(co_await *begin);
+  std::vector<typename std::remove_reference<decltype(begin->await_resume())>::type> vec;
+  while (begin != end)
+  {
+    vec.emplace_back(co_await *begin);
     ++begin;
   }
-  co_return vec;
+  co_return std::move(vec);
 }
-#else
-auto future_of_all_range(Iterator begin, Iterator end)
-    -> future_t<std::vector<typename decltype(*begin)::type>>
-{
-  std::vector<typename decltype(*begin)::type> vec;
-  while (begin != end) {
-    vec.push_back(co_await *begin);
-    ++begin;
-  }
-  co_return vec;
-}
-#endif
 
 // Define some helper templates to iterate through each element
 // of the tuple
 template <typename tuple_t, size_t N>
-struct coro_helper_t {
+struct callback_helper_t
+{
   static void set(tuple_t& tuple, std::function<void(void)> cb)
   {
-    std::get<N>(tuple)->_state->set_coroutine_callback(cb);
-    coro_helper_t<tuple_t, N - 1>::set(tuple, cb);
+    std::get<N>(tuple).set_callback(cb);
+    callback_helper_t<tuple_t, N - 1>::set(tuple, cb);
   }
 };
 // Specialization for last item
 template <typename tuple_t>
-struct coro_helper_t<tuple_t, 0> {
+struct callback_helper_t<tuple_t, 0>
+{
   static void set(tuple_t& tuple, std::function<void(void)> cb)
   {
-    std::get<0>(tuple)->_state->set_coroutine_callback(cb);
+    std::get<0>(tuple).set_callback(cb);
   }
 };
 
 template <typename tuple_t>
-void set_coro_helper(tuple_t& tuple, std::function<void(void)> cb)
+void set_callback_helper(tuple_t& tuple, std::function<void(void)> cb)
 {
-  coro_helper_t<tuple_t, std::tuple_size<tuple_t>::value - 1>::set(tuple, cb);
+  callback_helper_t<tuple_t, std::tuple_size<tuple_t>::value - 1>::set(tuple, cb);
 }
 
 // allows waiting for just one future to complete
 template <typename... Rest>
-struct multi_awaitable_state : public awaitable_state<void> {
+struct multi_awaitable_state : public awaitable_state<void>
+{
   // Store references to all the futures passed in.
-  std::tuple<Rest*...> _futures;
-  multi_awaitable_state() {}
+  std::tuple<Rest&...> _futures;
+  multi_awaitable_state(Rest&... args) : _futures(args...) {}
 
-  void set_args(Rest&&... args)
+  ~multi_awaitable_state() {}
+
+  void await_suspend(std::coroutine_handle<> resume_cb)
   {
-    _futures = std::tuple<Rest*...>{ &args... };
+    // Test to make sure nothing else is waiting on this future.
+    assert(((resume_cb == nullptr) || (_coro == nullptr)) && "This awaitable is already being awaited.");
+    _coro = resume_cb;
+
+    // Make any completion of a future call any_completed
+    std::function<void(void)> func = std::bind(&multi_awaitable_state::any_completed, this);
+    set_callback_helper(_futures, func);
   }
 
-  void set_coroutine_callback(std::function<void(void)> cb)
+  // any_completed will be called by any future completing
+  void any_completed()
   {
-    set_coro_helper(_futures, [this]() {
-      // reset callbacks on all futures to stop them
-      set_coro_helper(_futures, nullptr);
-      set_value();
-    });
-    awaitable_state<void>::set_coroutine_callback(cb);
+    set_callback_helper(_futures, nullptr);
+    set_value();
   }
 };
+
+template <typename T>
+T& future_of_any(T& multistate)
+{
+  return multistate;
+}
 
 // future_of_any is pretty complicated
 // We have to create a new promise with a custom awaitable state object
 template <typename T, typename... Rest>
-future_t<void, multi_awaitable_state<T, Rest...>> future_of_any(T& f,
-                                                                Rest&... args)
+awaitable_t<void> future_of_any(T& f, Rest&... args)
 {
-  promise_t<void, multi_awaitable_state<T, Rest...>> promise;
-  promise._state->set_args(std::forward<T>(f), std::forward<Rest>(args)...);
-  return promise.get_future();
+  multi_awaitable_state<T, Rest...> state(f, args...);
+  co_return co_await future_of_any(state);
 }
 
+#if 0
 // iterator_awaitable_state will track the index of which future completed
 template <typename Iterator>
-struct iterator_awaitable_state : public awaitable_state<Iterator> {
-  Iterator _begin;
-  Iterator _end;
-  iterator_awaitable_state(Iterator begin, Iterator end)
-    : _begin(begin), _end(end)
-  {}
+struct iterator_awaitable_state : public awaitable_state<Iterator>
+{
+  Iterator begin_;
+  Iterator end_;
+  iterator_awaitable_state(Iterator begin, Iterator end) : begin_(begin), end_(end)
+  {
+  }
 
   // any_completed will be called by any future completing
   void any_completed(Iterator completed)
   {
     // stop any other callbacks from coming in
-    for (Iterator c = _begin; c != _end; ++c)
-      c->_state->set_coroutine_callback(nullptr);
+    for (Iterator c = begin_; c != end_; ++c)
+      c->state_->set_callback(nullptr);
     set_value(completed);
   }
 
-  void set_coroutine_callback(std::function<void(void)> cb)
+  void set_callback(std::function<void(void)> cb)
   {
-    for (Iterator c = _begin; c != _end; ++c) {
-      std::function<void(void)> func =
-          std::bind(&iterator_awaitable_state::any_completed, this, c);
-      c->_state->set_coroutine_callback(func);
+    for (Iterator c = begin_; c != end_; ++c)
+    {
+      std::function<void(void)> func = std::bind(&iterator_awaitable_state::any_completed, this, c);
+      c->state_->set_callback(func);
     }
-    awaitable_state<Iterator>::set_coroutine_callback(cb);
+    awaitable_state<Iterator>::set_callback(cb);
   }
 };
 
 // returns the index of the iterator that succeeded
-template <typename Iterator>
-future_t<Iterator, iterator_awaitable_state<Iterator>> future_of_any_range(
-    Iterator begin,
-    Iterator end)
-{
-  promise_t<Iterator, iterator_awaitable_state<Iterator>> promise(begin, end);
-  return promise.get_future();
-}
-
-
-template <typename T1, typename S1, typename T2, typename S2>
-auto operator||(future_t<T1, S1>& t1, future_t<T2, S2>& t2)
-{
-  return future_of_any(t1, t2);
-}
-
-template <typename T1, typename S1, typename T2, typename S2>
-auto operator&&(future_t<T1, S1>& t1, future_t<T2, S2>& t2)
-{
-  return future_of_all(t1, t2);
-}
+//template <typename Iterator>
+//future_t<Iterator, iterator_awaitable_state<Iterator>> future_of_any_range(Iterator begin, Iterator end)
+//{
+//  promise_t<Iterator, iterator_awaitable_state<Iterator>> promise(begin, end);
+//  return promise.get_future();
+//}
+#endif
 
 // Simple RAII for uv_loop_t type
-class loop_t : public ::uv_loop_t {
-  int status = -1;
+class loop_t : public ::uv_loop_t
+{
+  int status_ = -1;
 
 public:
-  // No copy, move already prevented by dtor
-  loop_t(const loop_t&) = delete;
-  loop_t& operator=(const loop_t&) = delete;
-  loop_t() : ::uv_loop_t{ 0 }
+  loop_t& operator=(const loop_t&) = delete; // no copy
+  loop_t()
   {
-    status = uv_loop_init(this);
-    if (status != 0)
+    status_ = uv_loop_init(this);
+    if (status_ != 0)
       throw std::exception();
   }
   ~loop_t()
   {
-    close();
+    if (status_ == 0)
+      uv_loop_close(this);
   }
   int run()
   {
@@ -585,29 +511,44 @@ public:
   {
     return uv_run(this, mode);
   }
-  void close()
-  {
-    if (status == 0)
-      uv_loop_close(this);
-    status = -1;
-  }
 };
 
 // Simple RAII for uv_fs_t type
-struct fs_t : public ::uv_fs_t {
-  fs_t() : ::uv_fs_t{ 0 } {}
+struct fs_t : public ::uv_fs_t
+{
   ~fs_t()
   {
     ::uv_fs_req_cleanup(this);
   }
-  // No copy, move already prevented by dtor
+  fs_t() = default;
+  // movable, but not copyable
   fs_t(const fs_t&) = delete;
   fs_t& operator=(const fs_t&) = delete;
+  fs_t(fs_t&& f) = default;
+  fs_t& operator=(fs_t&&) = default;
+};
+
+struct getaddrinfo_t : public uv_getaddrinfo_t
+{
+  getaddrinfo_t()
+  {
+    this->addrinfo = nullptr;
+  }
+  ~getaddrinfo_t()
+  {
+    ::uv_freeaddrinfo(addrinfo);
+  }
+  // movable, but not copyable
+  getaddrinfo_t(const getaddrinfo_t&) = delete;
+  getaddrinfo_t& operator=(const getaddrinfo_t&) = delete;
+  getaddrinfo_t(getaddrinfo_t&& f) = default;
+  getaddrinfo_t& operator=(getaddrinfo_t&&) = default;
 };
 
 // Fixed size buffer
 template <size_t size>
-struct static_buf_t : ::uv_buf_t {
+struct static_buf_t : ::uv_buf_t
+{
   char buffer[size];
   static_buf_t()
   {
@@ -616,7 +557,8 @@ struct static_buf_t : ::uv_buf_t {
 };
 
 // Buffer based on null-terminated string
-struct string_buf_t : ::uv_buf_t {
+struct string_buf_t : ::uv_buf_t
+{
   string_buf_t(const char* p)
   {
     *(uv_buf_t*)this = uv_buf_init(const_cast<char*>(p), strlen(p));
@@ -631,113 +573,89 @@ struct string_buf_t : ::uv_buf_t {
 // These members mean this type is convertible to a uv_handle_t. This
 // can be used to make it easier to call functions that take a handle.
 template <typename T, typename = int, typename = int, typename = int>
-struct is_uv_handle_t : std::false_type {};
+struct is_uv_handle_t : std::false_type
+{};
 
 template <typename T>
-struct is_uv_handle_t<T,
-                      decltype((void)T::data, 0),
-                      decltype((void)T::loop, 0),
-                      decltype((void)T::type, 0)> : std::true_type {};
+struct is_uv_handle_t<T, decltype((void)T::data, 0), decltype((void)T::loop, 0), decltype((void)T::type, 0)>
+  : std::true_type
+{};
 
 template <typename T>
-auto unref(
-    T*                                                       handle,
-    typename std::enable_if<is_uv_handle_t<T>::value>::type* dummy = nullptr)
+auto unref(T* handle, typename std::enable_if<is_uv_handle_t<T>::value>::type* dummy = nullptr)
 {
   uv_unref(reinterpret_cast<uv_handle_t*>(handle));
 }
 
 template <typename T>
-auto ref(
-    T*                                                       handle,
-    typename std::enable_if<is_uv_handle_t<T>::value>::type* dummy = nullptr)
+auto ref(T* handle, typename std::enable_if<is_uv_handle_t<T>::value>::type* dummy = nullptr)
 {
   uv_ref(reinterpret_cast<uv_handle_t*>(handle));
 }
 
 /* switch_to_loop_thread must be called on a thread other than the loop thread
    or this function will hang. */
-inline auto switch_to_loop_thread(uv_async_t* req, uv_loop_t* loop)
+inline awaitable_t<void> switch_to_loop_thread(uv_async_t* req, uv_loop_t* loop)
 {
-  promise_t<void> awaitable;
-  auto            state = awaitable._state->lock();
-  req->data = state;
+  awaitable_state<void> awaitable;
+
+  req->data = &awaitable;
   /* We have to run this lazily (i.e. after suspension) or the async could
      complete before the caller starts awaiting, which would NOT actually
      result in resuming on the loop thread. */
-  state->_on_await = [=]() { uv_async_send(req); };
-  return awaitable.get_future();
+  awaitable._on_await = [=]() { uv_async_send(req); };
+  co_return co_await awaitable;
 }
 
-inline auto fs_open(uv_loop_t*  loop,
-                    uv_fs_t*    req,
-                    const char* path,
-                    int         flags,
-                    int         mode)
-{
-  promise_t<uv_file> awaitable;
-  auto               state = awaitable._state->lock();
-  req->data = state;
-
-  auto ret =
-      uv_fs_open(loop, req, path, flags, mode, [](uv_fs_t* req) -> void {
-        auto state = static_cast<promise_t<uv_file>::state_type*>(req->data);
-        state->set_value(req->result);
-        state->unlock();
-      });
-
-  if (ret != 0) {
-    state->set_value(ret);
-    state->unlock();
-  }
-  return awaitable.get_future();
-}
-
-// return reference to passed in awaitable so that fs_open is directly
-// awaitable
-inline auto& fs_open(awaitable_state<uv_file>& awaitable,
-                     uv_loop_t*                loop,
-                     uv_fs_t*                  req,
-                     const char*               path,
-                     int                       flags,
-                     int                       mode)
+//
+inline auto& uv_shutdown(awaitable_state<int>& awaitable, uv_shutdown_t* req, uv_stream_t* handle)
 {
   req->data = &awaitable;
 
-  auto ret =
-      uv_fs_open(loop, req, path, flags, mode, [](uv_fs_t* req) -> void {
-        static_cast<awaitable_state<uv_file>*>(req->data)->set_value(
-            req->result);
-      });
+  auto ret = uv_shutdown(req, handle, [](uv_shutdown_t* req, int status) -> void {
+    static_cast<awaitable_state<int>*>(req->data)->set_value(status);
+  });
 
   if (ret != 0)
     awaitable.set_value(ret);
   return awaitable;
 }
 
-inline auto fs_close(uv_loop_t* loop, uv_fs_t* req, uv_file file)
+inline awaitable_t<int> uv_shutdown(uv_stream_t* handle)
 {
-  promise_t<int> awaitable;
-  auto           state = awaitable._state->lock();
-  req->data = state;
-
-  auto ret = uv_fs_close(loop, req, file, [](uv_fs_t* req) -> void {
-    auto state = static_cast<promise_t<int>::state_type*>(req->data);
-    state->set_value(req->result);
-    state->unlock();
-  });
-
-  if (ret != 0) {
-    state->set_value(ret);
-    state->unlock();
-  }
-  return awaitable.get_future();
+  uv_shutdown_t        req;
+  awaitable_state<int> state;
+  co_return co_await uv_shutdown(state, &req, handle);
 }
 
-inline auto& fs_close(awaitable_state<int>& awaitable,
-                      uv_loop_t*            loop,
-                      uv_fs_t*              req,
-                      uv_file               file)
+// return reference to passed in awaitable so that uv_fs_open is directly
+// awaitable
+inline auto& uv_fs_open(awaitable_state<uv_file>& awaitable,
+                        uv_loop_t*                loop,
+                        uv_fs_t*                  req,
+                        const char*               path,
+                        int                       flags,
+                        int                       mode)
+{
+  req->data = &awaitable;
+
+  auto ret = uv_fs_open(loop, req, path, flags, mode, [](uv_fs_t* req) -> void {
+    static_cast<awaitable_state<uv_file>*>(req->data)->set_value(req->result);
+  });
+
+  if (ret != 0)
+    awaitable.set_value(ret);
+  return awaitable;
+}
+
+inline awaitable_t<uv_file> uv_fs_open(uv_loop_t* loop, const char* path, int flags, int mode)
+{
+  fs_t                     req;
+  awaitable_state<uv_file> state;
+  co_return co_await uv_fs_open(state, loop, &req, path, flags, mode);
+}
+
+inline auto& uv_fs_open(awaitable_state<int>& awaitable, uv_loop_t* loop, uv_fs_t* req, uv_file file)
 {
   req->data = &awaitable;
 
@@ -750,218 +668,673 @@ inline auto& fs_close(awaitable_state<int>& awaitable,
   return awaitable;
 }
 
-inline auto fs_write(uv_loop_t*     loop,
-                     uv_fs_t*       req,
-                     uv_file        file,
-                     const uv_buf_t bufs[],
-                     unsigned int   nbufs,
-                     int64_t        offset)
+inline awaitable_t<int> uv_fs_open(uv_loop_t* loop, uv_file file)
 {
-  promise_t<int> awaitable;
-  auto           state = awaitable._state->lock();
-  req->data = state;
-
-  auto ret = uv_fs_write(
-      loop, req, file, bufs, nbufs, offset, [](uv_fs_t* req) -> void {
-        auto state = static_cast<promise_t<int>::state_type*>(req->data);
-        state->set_value(req->result);
-        state->unlock();
-      });
-
-  if (ret != 0) {
-    state->set_value(ret);
-    state->unlock();
-  }
-  return awaitable.get_future();
+  fs_t                 req;
+  awaitable_state<int> state;
+  co_return co_await uv_fs_open(state, loop, &req, file);
 }
 
-inline auto& fs_write(awaitable_state<int>& awaitable,
-                      uv_loop_t*            loop,
-                      uv_fs_t*              req,
-                      uv_file               file,
+inline auto& uv_fs_read(awaitable_state<int>& awaitable,
+                        uv_loop_t*            loop,
+                        uv_fs_t*              req,
+                        uv_file               file,
+                        const uv_buf_t        bufs[],
+                        unsigned int          nbufs,
+                        int64_t               offset)
+{
+  req->data = &awaitable;
+
+  auto ret = uv_fs_read(loop, req, file, bufs, nbufs, offset, [](uv_fs_t* req) -> void {
+    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
+  });
+
+  if (ret != 0)
+    awaitable.set_value(ret);
+  return awaitable;
+}
+
+inline awaitable_t<int> uv_fs_read(uv_loop_t*     loop,
+                                   uv_file        file,
+                                   const uv_buf_t bufs[],
+                                   unsigned int   nbufs,
+                                   int64_t        offset)
+{
+  fs_t                 req;
+  awaitable_state<int> state;
+  co_return co_await uv_fs_read(state, loop, &req, file, bufs, nbufs, offset);
+}
+
+inline auto& fs_unlink(awaitable_state<int>& awaitable, uv_loop_t* loop, uv_fs_t* req, const char* path)
+{
+  req->data = &awaitable;
+
+  auto ret = uv_fs_unlink(loop, req, path, [](uv_fs_t* req) -> void {
+    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
+  });
+
+  if (ret != 0)
+    awaitable.set_value(ret);
+  return awaitable;
+}
+
+inline awaitable_t<int> fs_unlink(uv_loop_t* loop, const char* path)
+{
+  fs_t                 req;
+  awaitable_state<int> state;
+  co_return co_await fs_unlink(state, loop, &req, path);
+}
+
+inline auto& uv_fs_write(awaitable_state<int>& awaitable,
+                         uv_loop_t*            loop,
+                         uv_fs_t*              req,
+                         uv_file               file,
+                         const uv_buf_t        bufs[],
+                         unsigned int          nbufs,
+                         int64_t               offset)
+{
+  req->data = &awaitable;
+
+  auto ret = uv_fs_write(loop, req, file, bufs, nbufs, offset, [](uv_fs_t* req) -> void {
+    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
+  });
+
+  if (ret != 0)
+    awaitable.set_value(ret);
+  return awaitable;
+}
+
+inline awaitable_t<int> uv_fs_write(uv_loop_t*     loop,
+                                    uv_file        file,
+                                    const uv_buf_t bufs[],
+                                    unsigned int   nbufs,
+                                    int64_t        offset)
+{
+  fs_t                 req;
+  awaitable_state<int> state;
+  co_return co_await uv_fs_write(state, loop, &req, file, bufs, nbufs, offset);
+}
+
+inline auto& uv_fs_copyfile(awaitable_state<int>& awaitable,
+                            uv_loop_t*            loop,
+                            uv_fs_t*              req,
+                            const char*           path,
+                            const char*           new_path,
+                            int                   flags)
+{
+  req->data = &awaitable;
+
+  auto ret = uv_fs_copyfile(loop, req, path, new_path, flags, [](uv_fs_t* req) -> void {
+    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
+  });
+
+  if (ret != 0)
+    awaitable.set_value(ret);
+  return awaitable;
+}
+
+inline awaitable_t<int> uv_fs_copyfile(uv_loop_t* loop, const char* path, const char* new_path, int flags)
+{
+  fs_t                 req;
+  awaitable_state<int> state;
+  co_return co_await uv_fs_copyfile(state, loop, &req, path, new_path, flags);
+}
+
+inline auto& uv_fs_mkdir(awaitable_state<int>& awaitable, uv_loop_t* loop, uv_fs_t* req, const char* path, int mode)
+{
+  req->data = &awaitable;
+
+  auto ret = uv_fs_mkdir(loop, req, path, mode, [](uv_fs_t* req) -> void {
+    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
+  });
+
+  if (ret != 0)
+    awaitable.set_value(ret);
+  return awaitable;
+}
+
+inline awaitable_t<int> uv_fs_mkdir(uv_loop_t* loop, const char* path, int mode)
+{
+  fs_t                 req;
+  awaitable_state<int> state;
+  co_return co_await uv_fs_mkdir(state, loop, &req, path, mode);
+}
+
+inline auto& uv_fs_mkdtemp(awaitable_state<int>& awaitable, uv_loop_t* loop, uv_fs_t* req, const char* tpl)
+{
+  req->data = &awaitable;
+
+  auto ret = uv_fs_mkdtemp(loop, req, tpl, [](uv_fs_t* req) -> void {
+    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
+  });
+
+  if (ret != 0)
+    awaitable.set_value(ret);
+  return awaitable;
+}
+
+inline awaitable_t<int> uv_fs_mkdtemp(uv_loop_t* loop, const char* tpl)
+{
+  fs_t                 req;
+  awaitable_state<int> state;
+  co_return co_await uv_fs_mkdtemp(state, loop, &req, tpl);
+}
+
+inline auto& uv_fs_rmdir(awaitable_state<int>& awaitable, uv_loop_t* loop, uv_fs_t* req, const char* path)
+{
+  req->data = &awaitable;
+
+  auto ret = uv_fs_rmdir(loop, req, path, [](uv_fs_t* req) -> void {
+    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
+  });
+
+  if (ret != 0)
+    awaitable.set_value(ret);
+  return awaitable;
+}
+
+inline awaitable_t<int> uv_fs_rmdir(uv_loop_t* loop, const char* path)
+{
+  fs_t                 req;
+  awaitable_state<int> state;
+  co_return co_await uv_fs_rmdir(state, loop, &req, path);
+}
+
+// TODO - uv_fs_scandir
+
+inline auto& uv_fs_stat(awaitable_state<int>& awaitable, uv_loop_t* loop, uv_fs_t* req, const char* path)
+{
+  req->data = &awaitable;
+
+  auto ret = uv_fs_stat(loop, req, path, [](uv_fs_t* req) -> void {
+    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
+  });
+
+  if (ret != 0)
+    awaitable.set_value(ret);
+  return awaitable;
+}
+
+inline awaitable_t<int> uv_fs_stat(uv_loop_t* loop, const char* path)
+{
+  fs_t                 req;
+  awaitable_state<int> state;
+  co_return co_await uv_fs_stat(state, loop, &req, path);
+}
+
+inline auto& uv_fs_fstat(awaitable_state<int>& awaitable, uv_loop_t* loop, uv_fs_t* req, uv_file file)
+{
+  req->data = &awaitable;
+
+  auto ret = uv_fs_fstat(loop, req, file, [](uv_fs_t* req) -> void {
+    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
+  });
+
+  if (ret != 0)
+    awaitable.set_value(ret);
+  return awaitable;
+}
+
+inline awaitable_t<int> uv_fs_fstat(uv_loop_t* loop, uv_file file)
+{
+  fs_t                 req;
+  awaitable_state<int> state;
+  co_return co_await uv_fs_fstat(state, loop, &req, file);
+}
+
+inline auto& uv_fs_rename(awaitable_state<int>& awaitable,
+                          uv_loop_t*            loop,
+                          uv_fs_t*              req,
+                          const char*           path,
+                          const char*           new_path)
+{
+  req->data = &awaitable;
+
+  auto ret = uv_fs_rename(loop, req, path, new_path, [](uv_fs_t* req) -> void {
+    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
+  });
+
+  if (ret != 0)
+    awaitable.set_value(ret);
+  return awaitable;
+}
+
+inline awaitable_t<int> uv_fs_rename(uv_loop_t* loop, const char* path, const char* new_path)
+{
+  fs_t                 req;
+  awaitable_state<int> state;
+  co_return co_await uv_fs_rename(state, loop, &req, path, new_path);
+}
+
+inline auto& uv_fs_fsync(awaitable_state<int>& awaitable, uv_loop_t* loop, uv_fs_t* req, uv_file file)
+{
+  req->data = &awaitable;
+
+  auto ret = uv_fs_fsync(loop, req, file, [](uv_fs_t* req) -> void {
+    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
+  });
+
+  if (ret != 0)
+    awaitable.set_value(ret);
+  return awaitable;
+}
+
+inline awaitable_t<int> uv_fs_fsync(uv_loop_t* loop, uv_file file)
+{
+  fs_t                 req;
+  awaitable_state<int> state;
+  co_return co_await uv_fs_fsync(state, loop, &req, file);
+}
+
+inline auto& uv_fs_fdatasync(awaitable_state<int>& awaitable, uv_loop_t* loop, uv_fs_t* req, uv_file file)
+{
+  req->data = &awaitable;
+
+  auto ret = uv_fs_fdatasync(loop, req, file, [](uv_fs_t* req) -> void {
+    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
+  });
+
+  if (ret != 0)
+    awaitable.set_value(ret);
+  return awaitable;
+}
+
+inline awaitable_t<int> uv_fs_fdatasync(uv_loop_t* loop, uv_file file)
+{
+  fs_t                 req;
+  awaitable_state<int> state;
+  co_return co_await uv_fs_fdatasync(state, loop, &req, file);
+}
+
+inline auto& uv_fs_ftruncate(awaitable_state<int>& awaitable,
+                             uv_loop_t*            loop,
+                             uv_fs_t*              req,
+                             uv_file               file,
+                             int64_t               offset)
+{
+  req->data = &awaitable;
+
+  auto ret = uv_fs_ftruncate(loop, req, file, offset, [](uv_fs_t* req) -> void {
+    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
+  });
+
+  if (ret != 0)
+    awaitable.set_value(ret);
+  return awaitable;
+}
+
+inline awaitable_t<int> uv_fs_ftruncate(uv_loop_t* loop, uv_file file, int64_t offset)
+{
+  fs_t                 req;
+  awaitable_state<int> state;
+  co_return co_await uv_fs_ftruncate(state, loop, &req, file, offset);
+}
+
+inline auto& uv_fs_sendfile(awaitable_state<int>& awaitable,
+                            uv_loop_t*            loop,
+                            uv_fs_t*              req,
+                            uv_file               out_fd,
+                            uv_file               in_fd,
+                            int64_t               in_offset,
+                            size_t                length)
+{
+  req->data = &awaitable;
+
+  auto ret = uv_fs_sendfile(loop, req, out_fd, in_fd, in_offset, length, [](uv_fs_t* req) -> void {
+    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
+  });
+
+  if (ret != 0)
+    awaitable.set_value(ret);
+  return awaitable;
+}
+
+inline awaitable_t<int> uv_fs_sendfile(uv_loop_t* loop,
+                                       uv_file    out_fd,
+                                       uv_file    in_fd,
+                                       int64_t    in_offset,
+                                       size_t     length)
+{
+  fs_t                 req;
+  awaitable_state<int> state;
+  co_return co_await uv_fs_sendfile(state, loop, &req, out_fd, in_fd, in_offset, length);
+}
+
+inline auto& uv_fs_access(awaitable_state<int>& awaitable, uv_loop_t* loop, uv_fs_t* req, const char* path, int mode)
+{
+  req->data = &awaitable;
+
+  auto ret = uv_fs_access(loop, req, path, mode, [](uv_fs_t* req) -> void {
+    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
+  });
+
+  if (ret != 0)
+    awaitable.set_value(ret);
+  return awaitable;
+}
+
+inline awaitable_t<int> uv_fs_access(uv_loop_t* loop, const char* path, int mode)
+{
+  fs_t                 req;
+  awaitable_state<int> state;
+  co_return co_await uv_fs_access(state, loop, &req, path, mode);
+}
+
+inline auto& uv_fs_chmod(awaitable_state<int>& awaitable, uv_loop_t* loop, uv_fs_t* req, const char* path, int mode)
+{
+  req->data = &awaitable;
+
+  auto ret = uv_fs_chmod(loop, req, path, mode, [](uv_fs_t* req) -> void {
+    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
+  });
+
+  if (ret != 0)
+    awaitable.set_value(ret);
+  return awaitable;
+}
+
+inline awaitable_t<int> uv_fs_chmod(uv_loop_t* loop, const char* path, int mode)
+{
+  fs_t                 req;
+  awaitable_state<int> state;
+  co_return co_await uv_fs_chmod(state, loop, &req, path, mode);
+}
+
+inline auto& uv_fs_utime(awaitable_state<int>& awaitable,
+                         uv_loop_t*            loop,
+                         uv_fs_t*              req,
+                         const char*           path,
+                         double                atime,
+                         double                mtime)
+{
+  req->data = &awaitable;
+
+  auto ret = uv_fs_utime(loop, req, path, atime, mtime, [](uv_fs_t* req) -> void {
+    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
+  });
+
+  if (ret != 0)
+    awaitable.set_value(ret);
+  return awaitable;
+}
+
+inline awaitable_t<int> uv_fs_utime(uv_loop_t* loop, const char* path, double atime, double mtime)
+{
+  fs_t                 req;
+  awaitable_state<int> state;
+  co_return co_await uv_fs_utime(state, loop, &req, path, atime, mtime);
+}
+
+inline auto& uv_fs_futime(awaitable_state<int>& awaitable,
+                          uv_loop_t*            loop,
+                          uv_fs_t*              req,
+                          uv_file               file,
+                          double                atime,
+                          double                mtime)
+{
+  req->data = &awaitable;
+
+  auto ret = uv_fs_futime(loop, req, file, atime, mtime, [](uv_fs_t* req) -> void {
+    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
+  });
+
+  if (ret != 0)
+    awaitable.set_value(ret);
+  return awaitable;
+}
+
+inline awaitable_t<int> uv_fs_futime(uv_loop_t* loop, uv_file file, double atime, double mtime)
+{
+  fs_t                 req;
+  awaitable_state<int> state;
+  co_return co_await uv_fs_futime(state, loop, &req, file, atime, mtime);
+}
+
+inline auto& uv_fs_lstat(awaitable_state<int>& awaitable, uv_loop_t* loop, uv_fs_t* req, const char* path)
+{
+  req->data = &awaitable;
+
+  auto ret = uv_fs_lstat(loop, req, path, [](uv_fs_t* req) -> void {
+    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
+  });
+
+  if (ret != 0)
+    awaitable.set_value(ret);
+  return awaitable;
+}
+
+inline awaitable_t<int> uv_fs_lstat(uv_loop_t* loop, const char* path)
+{
+  fs_t                 req;
+  awaitable_state<int> state;
+  co_return co_await uv_fs_lstat(state, loop, &req, path);
+}
+
+inline auto& uv_fs_link(awaitable_state<int>& awaitable,
+                        uv_loop_t*            loop,
+                        uv_fs_t*              req,
+                        const char*           path,
+                        const char*           new_path)
+{
+  req->data = &awaitable;
+
+  auto ret = uv_fs_link(loop, req, path, new_path, [](uv_fs_t* req) -> void {
+    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
+  });
+
+  if (ret != 0)
+    awaitable.set_value(ret);
+  return awaitable;
+}
+
+inline awaitable_t<int> uv_fs_link(uv_loop_t* loop, const char* path, const char* new_path)
+{
+  fs_t                 req;
+  awaitable_state<int> state;
+  co_return co_await uv_fs_link(state, loop, &req, path, new_path);
+}
+
+inline auto& uv_fs_symlink(awaitable_state<int>& awaitable,
+                           uv_loop_t*            loop,
+                           uv_fs_t*              req,
+                           const char*           path,
+                           const char*           new_path,
+                           int                   flags)
+{
+  req->data = &awaitable;
+
+  auto ret = uv_fs_symlink(loop, req, path, new_path, flags, [](uv_fs_t* req) -> void {
+    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
+  });
+
+  if (ret != 0)
+    awaitable.set_value(ret);
+  return awaitable;
+}
+
+inline awaitable_t<int> uv_fs_symlink(uv_loop_t* loop, const char* path, const char* new_path, int flags)
+{
+  fs_t                 req;
+  awaitable_state<int> state;
+  co_return co_await uv_fs_symlink(state, loop, &req, path, new_path, flags);
+}
+
+inline auto& uv_fs_readlink(awaitable_state<int>& awaitable, uv_loop_t* loop, uv_fs_t* req, const char* path)
+{
+  req->data = &awaitable;
+
+  auto ret = uv_fs_readlink(loop, req, path, [](uv_fs_t* req) -> void {
+    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
+  });
+
+  if (ret != 0)
+    awaitable.set_value(ret);
+  return awaitable;
+}
+
+inline awaitable_t<int> uv_fs_readlink(uv_loop_t* loop, const char* path)
+{
+  fs_t                 req;
+  awaitable_state<int> state;
+  co_return co_await uv_fs_readlink(state, loop, &req, path);
+}
+
+inline auto& uv_fs_realpath(awaitable_state<int>& awaitable, uv_loop_t* loop, uv_fs_t* req, const char* path)
+{
+  req->data = &awaitable;
+
+  auto ret = uv_fs_realpath(loop, req, path, [](uv_fs_t* req) -> void {
+    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
+  });
+
+  if (ret != 0)
+    awaitable.set_value(ret);
+  return awaitable;
+}
+
+inline awaitable_t<int> uv_fs_realpath(uv_loop_t* loop, const char* path)
+{
+  fs_t                 req;
+  awaitable_state<int> state;
+  co_return co_await uv_fs_realpath(state, loop, &req, path);
+}
+
+inline auto& uv_fs_fchmod(awaitable_state<int>& awaitable, uv_loop_t* loop, uv_fs_t* req, uv_file file, int mode)
+{
+  req->data = &awaitable;
+
+  auto ret = uv_fs_fchmod(loop, req, file, mode, [](uv_fs_t* req) -> void {
+    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
+  });
+
+  if (ret != 0)
+    awaitable.set_value(ret);
+  return awaitable;
+}
+
+inline awaitable_t<int> uv_fs_fchmod(uv_loop_t* loop, uv_file file, int mode)
+{
+  fs_t                 req;
+  awaitable_state<int> state;
+  co_return co_await uv_fs_fchmod(state, loop, &req, file, mode);
+}
+
+inline auto& uv_fs_chown(awaitable_state<int>& awaitable,
+                         uv_loop_t*            loop,
+                         uv_fs_t*              req,
+                         const char*           path,
+                         uv_uid_t              uid,
+                         uv_gid_t              gid)
+{
+  req->data = &awaitable;
+
+  auto ret = uv_fs_chown(loop, req, path, uid, gid, [](uv_fs_t* req) -> void {
+    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
+  });
+
+  if (ret != 0)
+    awaitable.set_value(ret);
+  return awaitable;
+}
+
+inline awaitable_t<int> uv_fs_chown(uv_loop_t* loop, const char* path, uv_uid_t uid, uv_gid_t gid)
+{
+  fs_t                 req;
+  awaitable_state<int> state;
+  co_return co_await uv_fs_chown(state, loop, &req, path, uid, gid);
+}
+
+inline auto& uv_fs_fchown(awaitable_state<int>& awaitable,
+                          uv_loop_t*            loop,
+                          uv_fs_t*              req,
+                          uv_file               file,
+                          uv_uid_t              uid,
+                          uv_gid_t              gid)
+{
+  req->data = &awaitable;
+
+  auto ret = uv_fs_fchown(loop, req, file, uid, gid, [](uv_fs_t* req) -> void {
+    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
+  });
+
+  if (ret != 0)
+    awaitable.set_value(ret);
+  return awaitable;
+}
+
+inline awaitable_t<int> uv_fs_fchown(uv_loop_t* loop, uv_file file, uv_uid_t uid, uv_gid_t gid)
+{
+  fs_t                 req;
+  awaitable_state<int> state;
+  co_return co_await uv_fs_fchown(state, loop, &req, file, uid, gid);
+}
+
+inline auto& uv_listen(awaitable_state<int>& awaitable, uv_stream_t* stream, int backlog)
+{
+  stream->data = &awaitable;
+
+  auto ret = uv_listen(stream, backlog, [](uv_stream_t* stream, int status) -> void {
+    static_cast<awaitable_state<int>*>(stream->data)->set_value(status);
+  });
+
+  if (ret != 0)
+    awaitable.set_value(ret);
+  return awaitable;
+}
+
+inline awaitable_t<int> uv_listen(uv_stream_t* stream, int backlog)
+{
+  awaitable_state<int> state;
+  co_return co_await uv_listen(state, stream, backlog);
+}
+
+// generic stream functions
+inline auto& uv_write(awaitable_state<int>& awaitable,
+                      ::uv_write_t*         req,
+                      uv_stream_t*          handle,
                       const uv_buf_t        bufs[],
-                      unsigned int          nbufs,
-                      int64_t               offset)
+                      unsigned int          nbufs)
 {
   req->data = &awaitable;
 
-  auto ret = uv_fs_write(
-      loop, req, file, bufs, nbufs, offset, [](uv_fs_t* req) -> void {
-        static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
-      });
+  auto ret = uv_write(req, handle, bufs, nbufs, [](uv_write_t* req, int status) -> void {
+    static_cast<awaitable_state<int>*>(req->data)->set_value(status);
+  });
 
   if (ret != 0)
     awaitable.set_value(ret);
   return awaitable;
 }
 
-inline auto fs_read(uv_loop_t*     loop,
-                    uv_fs_t*       req,
-                    uv_file        file,
-                    const uv_buf_t bufs[],
-                    unsigned int   nbufs,
-                    int64_t        offset)
+inline awaitable_t<int> uv_write(uv_stream_t* handle, const uv_buf_t bufs[], unsigned int nbufs)
 {
-  promise_t<int> awaitable;
-  auto           state = awaitable._state->lock();
-  req->data = state;
-
-  auto ret = uv_fs_read(
-      loop, req, file, bufs, nbufs, offset, [](uv_fs_t* req) -> void {
-        auto state = static_cast<promise_t<int>::state_type*>(req->data);
-        state->set_value(req->result);
-        state->unlock();
-      });
-
-  if (ret != 0) {
-    state->set_value(ret);
-    state->unlock();
-  }
-  return awaitable.get_future();
-}
-
-inline auto& fs_read(awaitable_state<int>& awaitable,
-                     uv_loop_t*            loop,
-                     uv_fs_t*              req,
-                     uv_file               file,
-                     const uv_buf_t        bufs[],
-                     unsigned int          nbufs,
-                     int64_t               offset)
-{
-  req->data = &awaitable;
-
-  auto ret = uv_fs_read(
-      loop, req, file, bufs, nbufs, offset, [](uv_fs_t* req) -> void {
-        static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
-      });
-
-  if (ret != 0)
-    awaitable.set_value(ret);
-  return awaitable;
-}
-
-// generic stream functions
-inline auto write(::uv_write_t*  req,
-                  uv_stream_t*   handle,
-                  const uv_buf_t bufs[],
-                  unsigned int   nbufs)
-{
-  promise_t<int> awaitable;
-  auto           state = awaitable._state->lock();
-  req->data = state;
-
-  auto ret = uv_write(
-      req, handle, bufs, nbufs, [](uv_write_t* req, int status) -> void {
-        auto state = static_cast<promise_t<int>::state_type*>(req->data);
-        state->set_value(status);
-        state->unlock();
-      });
-
-  if (ret != 0) {
-    state->set_value(ret);
-    state->unlock();
-  }
-  return awaitable.get_future();
-}
-
-// generic stream functions
-inline auto& write(awaitable_state<int>& awaitable,
-                   ::uv_write_t*         req,
-                   uv_stream_t*          handle,
-                   const uv_buf_t        bufs[],
-                   unsigned int          nbufs)
-{
-  req->data = &awaitable;
-
-  auto ret = uv_write(
-      req, handle, bufs, nbufs, [](uv_write_t* req, int status) -> void {
-        static_cast<awaitable_state<int>*>(req->data)->set_value(status);
-      });
-
-  if (ret != 0)
-    awaitable.set_value(ret);
-  return awaitable;
+  uv_write_t           req;
+  awaitable_state<int> state;
+  co_return co_await uv_write(state, &req, handle, bufs, nbufs);
 }
 
 template <typename T>
-auto close(
-    T*                                                       handle,
-    typename std::enable_if<is_uv_handle_t<T>::value>::type* dummy = nullptr)
-{
-  promise_t<void> awaitable;
-  auto            state = awaitable._state->lock();
-  handle->data = state;
-
-  // uv_close returns void so no need to test return value
-  uv_close(reinterpret_cast<uv_handle_t*>(handle),
-           [](uv_handle_t* req) -> void {
-             auto state = static_cast<promise_t<void>::state_type*>(req->data);
-             state->set_value();
-             state->unlock();
-           });
-  return awaitable.get_future();
-}
-
-template <typename T>
-auto& close(
-    awaitable_state<void>&                                   awaitable,
-    T*                                                       handle,
-    typename std::enable_if<is_uv_handle_t<T>::value>::type* dummy = nullptr)
+auto& uv_close(awaitable_state<void>&                                   awaitable,
+               T*                                                       handle,
+               typename std::enable_if<is_uv_handle_t<T>::value>::type* dummy = nullptr)
 {
   handle->data = &awaitable;
 
   // uv_close returns void so no need to test return value
   uv_close(reinterpret_cast<uv_handle_t*>(handle),
-           [](uv_handle_t* req) -> void {
-             static_cast<awaitable_state<void>*>(req->data)->set_value();
-           });
+           [](uv_handle_t* req) -> void { static_cast<awaitable_state<void>*>(req->data)->set_value(); });
   return awaitable;
 }
 
-// timer_start returns a promise, not a future.  This is because a timer can be
-// repeating You need to call next_future and await on it each time.  Note: if
-// this is not a repeating timer then calling it multiple times will cause the
-// resumable function to "hang" (i.e. never complete).
-inline auto timer_start(uv_timer_t* timer, uint64_t timeout, uint64_t repeat)
+template <typename T>
+inline awaitable_t<void> uv_close(T* handle, typename std::enable_if<is_uv_handle_t<T>::value>::type* dummy = nullptr)
 {
-  promise_t<int> awaitable;
-  auto           state = awaitable._state.get();
-  timer->data = state;
-
-  auto ret = ::uv_timer_start(
-      timer,
-      [](uv_timer_t* req) -> void {
-        auto state = static_cast<promise_t<int>::state_type*>(req->data);
-        state->set_value(0);
-      },
-      timeout, repeat);
-
-  if (ret != 0)
-    state->set_value(ret);
-  return awaitable;
+  awaitable_state<void> state;
+  co_await uv_close(state, handle);
 }
 
-// This function does return a future as there is no repeat happening.
-inline auto timer_start(uv_timer_t* timer, uint64_t timeout)
+struct timer_state_t : public awaitable_state<int>
 {
-  promise_t<int> awaitable;
-  auto           state = awaitable._state.get();
-  timer->data = state;
-
-  auto ret = ::uv_timer_start(
-      timer,
-      [](uv_timer_t* req) -> void {
-        auto state = static_cast<promise_t<int>::state_type*>(req->data);
-        state->set_value(0);
-      },
-      timeout, 0);
-
-  if (ret != 0)
-    state->set_value(ret);
-  return awaitable.get_future();
-}
-
-struct timer_state_t : public awaitable_state<int> {
   timer_state_t& next()
   {
     reset();
@@ -969,225 +1342,124 @@ struct timer_state_t : public awaitable_state<int> {
   }
 };
 
-inline auto& timer_start(timer_state_t& awaitable,
-                         uv_timer_t*    timer,
-                         uint64_t       timeout,
-                         uint64_t       repeat)
+inline auto& uv_timer_start(timer_state_t& awaitable, uv_timer_t* timer, uint64_t timeout, uint64_t repeat)
 {
   timer->data = &awaitable;
 
   auto ret = ::uv_timer_start(
-      timer,
-      [](uv_timer_t* req) -> void {
-        static_cast<timer_state_t*>(req->data)->set_value(0);
-      },
-      timeout, repeat);
+      timer, [](uv_timer_t* req) -> void { static_cast<timer_state_t*>(req->data)->set_value(0); }, timeout, repeat);
 
   if (ret != 0)
     awaitable.set_value(ret);
   return awaitable;
 }
 
-inline auto tcp_connect(uv_connect_t*          req,
-                        uv_tcp_t*              socket,
-                        const struct sockaddr* dest)
+inline auto& uv_timer_start(awaitable_state<int>& awaitable, uv_timer_t* timer, uint64_t timeout)
 {
-  promise_t<int> awaitable;
-  auto           state = awaitable._state->lock();
-  req->data = state;
+  timer->data = &awaitable;
 
-  auto ret = ::uv_tcp_connect(
-      req, socket, dest, [](uv_connect_t* req, int status) -> void {
-        auto state = static_cast<promise_t<int>::state_type*>(req->data);
-        state->set_value(status);
-        state->unlock();
-      });
+  auto ret = ::uv_timer_start(
+      timer, [](uv_timer_t* req) -> void { static_cast<timer_state_t*>(req->data)->set_value(0); }, timeout, 0);
 
-  if (ret != 0) {
-    state->set_value(ret);
-    state->unlock();
-  }
-  return awaitable.get_future();
+  if (ret != 0)
+    awaitable.set_value(ret);
+  return awaitable;
 }
 
-inline auto& tcp_connect(awaitable_state<int>&  awaitable,
-                         uv_connect_t*          req,
-                         uv_tcp_t*              socket,
-                         const struct sockaddr* dest)
+inline awaitable_t<int> uv_timer_start(uint64_t timeout)
+{
+  awaitable_state<int> state;
+  uv_timer_t           timer;
+  co_return co_await uv_timer_start(state, &timer, timeout);
+}
+
+inline auto& uv_tcp_connect(awaitable_state<int>&  awaitable,
+                            uv_connect_t*          req,
+                            uv_tcp_t*              socket,
+                            const struct sockaddr* dest)
 {
   req->data = &awaitable;
 
-  auto ret = ::uv_tcp_connect(
-      req, socket, dest, [](uv_connect_t* req, int status) -> void {
+  auto ret = ::uv_tcp_connect(req, socket, dest, [](uv_connect_t* req, int status) -> void {
+    static_cast<awaitable_state<int>*>(req->data)->set_value(status);
+  });
+
+  if (ret != 0)
+    awaitable.set_value(ret);
+  return awaitable;
+}
+
+inline awaitable_t<int> uv_tcp_connect(uv_connect_t* req, uv_tcp_t* socket, const struct sockaddr* dest)
+{
+  awaitable_state<int> state;
+  co_return co_await uv_tcp_connect(state, req, socket, dest);
+}
+
+inline auto& uv_getaddrinfo(awaitable_state<int>&  awaitable,
+                            uv_loop_t*             loop,
+                            uv_getaddrinfo_t*      req,
+                            const char*            node,
+                            const char*            service,
+                            const struct addrinfo* hints)
+{
+  req->data = &awaitable;
+
+  auto ret = ::uv_getaddrinfo(
+      loop, req,
+      [](uv_getaddrinfo_t* req, int status, struct addrinfo* res) -> void {
+        assert(res == req->addrinfo);
         static_cast<awaitable_state<int>*>(req->data)->set_value(status);
-      });
-
-  if (ret != 0)
-    awaitable.set_value(ret);
-  return awaitable;
-}
-
-inline auto pipe_connect(uv_connect_t* req,
-                         uv_pipe_t*    handle,
-                         const char*   name)
-{
-  promise_t<int> awaitable;
-  auto           state = awaitable._state->lock();
-  req->data = state;
-
-  (void)::uv_pipe_connect(
-      req, handle, name, [](uv_connect_t* req, int status) -> void {
-        auto state = static_cast<promise_t<int>::state_type*>(req->data);
-        state->set_value(status);
-        state->unlock();
-      });
-
-  return awaitable.get_future();
-}
-
-inline auto& pipe_connect(awaitable_state<int>& awaitable,
-                          uv_connect_t*         req,
-                          uv_pipe_t*            handle,
-                          const char*           name)
-{
-  req->data = &awaitable;
-
-  (void)::uv_pipe_connect(
-      req, handle, name, [](uv_connect_t* req, int status) -> void {
-        auto state = static_cast<awaitable_state<int>*>(req->data);
-        state->set_value(status);
-      });
-
-  return awaitable;
-}
-
-inline auto listen(uv_stream_t* stream, int backlog)
-{
-  promise_t<int> awaitable;
-  auto           state = awaitable._state->lock();
-  stream->data = state;
-
-  int ret =
-      ::uv_listen(stream, backlog, [](uv_stream_t* req, int status) -> void {
-        auto state = static_cast<promise_t<int>::state_type*>(req->data);
-        state->set_value(status);
-        state->unlock();
-      });
-
-  if (ret != 0) {
-    state->set_value(ret);
-    state->unlock();
-  }
-
-  return awaitable.get_future();
-}
-
-inline auto& listen(awaitable_state<int>& awaitable,
-                    uv_stream_t*          stream,
-                    int                   backlog)
-{
-  stream->data = &awaitable;
-
-  int ret =
-      ::uv_listen(stream, backlog, [](uv_stream_t* req, int status) -> void {
-        auto state = static_cast<awaitable_state<int>*>(req->data);
-        state->set_value(status);
-      });
-
-  if (ret != 0) {
-    awaitable.set_value(ret);
-  }
-
-  return awaitable;
-}
-
-// Create an extended state to hold the addrinfo that is passed in the callback
-struct addrinfo_state : public awaitable_state<int> {
-  ::addrinfo* _addrinfo{ nullptr };
-  ~addrinfo_state()
-  {
-    uv_freeaddrinfo(_addrinfo);
-  }
-  void set_value(int status, addrinfo* addrinfo)
-  {
-    _addrinfo = addrinfo;
-    awaitable_state<int>::set_value(status);
-  }
-};
-
-inline auto getaddrinfo(uv_loop_t*             loop,
-                        uv_getaddrinfo_t*      req,
-                        const char*            node,
-                        const char*            service,
-                        const struct addrinfo* hints)
-{
-  promise_t<int, addrinfo_state> awaitable;
-  auto                           state = awaitable._state->lock();
-  req->data = state;
-
-  auto ret = ::uv_getaddrinfo(
-      loop, req,
-      [](uv_getaddrinfo_t* req, int status, struct addrinfo* res) -> void {
-        auto state = static_cast<promise_t<int, addrinfo_state>::state_type*>(
-            req->data);
-        state->set_value(status, res);
-        state->unlock();
-      },
-      node, service, hints);
-
-  if (ret != 0) {
-    state->set_value(ret, nullptr);
-    state->unlock();
-  }
-  return awaitable.get_future();
-}
-
-inline auto& getaddrinfo(addrinfo_state&        awaitable,
-                         uv_loop_t*             loop,
-                         uv_getaddrinfo_t*      req,
-                         const char*            node,
-                         const char*            service,
-                         const struct addrinfo* hints)
-{
-  req->data = &awaitable;
-
-  auto ret = ::uv_getaddrinfo(
-      loop, req,
-      [](uv_getaddrinfo_t* req, int status, struct addrinfo* res) -> void {
-        static_cast<addrinfo_state*>(req->data)->set_value(status, res);
       },
       node, service, hints);
 
   if (ret != 0)
-    awaitable.set_value(ret, nullptr);
+  {
+    assert(req->addrinfo == nullptr);
+    awaitable.set_value(ret);
+  }
   return awaitable;
 }
 
-// A read_buffer is allocated dynamically and lifetime is controlled through
-// counted_ptr in read_request_t and in the read_buffer::awaitable.  We may
-// need to allocate a read_buffer before the client code calls read_next. Once
-// they do, however, lifetime is controlled by the future.
-struct read_buffer : public awaitable_state<void> {
+inline awaitable_t<int> uv_getaddrinfo(uv_loop_t*             loop,
+                                       uv_getaddrinfo_t*      req,
+                                       const char*            node,
+                                       const char*            service,
+                                       const struct addrinfo* hints)
+{
+  awaitable_state<int> state;
+  co_return co_await uv_getaddrinfo(state, loop, req, node, service, hints);
+}
+
+struct buffer_info
+{
   uv_buf_t _buf = uv_buf_init(nullptr, 0);
   ssize_t  _nread{ 0 };
 
-  ~read_buffer()
+  buffer_info() = default;
+  buffer_info(const uv_buf_t* buf, ssize_t nread)
+  {
+    memcpy(&_buf, buf, sizeof(uv_buf_t));
+    _nread = nread;
+  }
+  ~buffer_info()
   {
     if (_buf.base != nullptr)
       delete[] _buf.base;
   }
-
-  void set_value(ssize_t nread, const uv_buf_t* p)
+  // movable, but not copyable
+  buffer_info(const buffer_info&) = delete;
+  buffer_info& operator=(const buffer_info&) = delete;
+  buffer_info(buffer_info&& f)
   {
-    _buf = *p;
-    _nread = nread;
-    awaitable_state<void>::set_value();
+    _buf = f._buf;
+    memset(&f._buf, 0, sizeof(uv_buf_t));
+    _nread = f._nread;
   }
-
-  // The result of awaiting on this will be std::counted_ptr<read_buffer>.
-  counted_ptr<read_buffer> get_value()
+  buffer_info& operator=(buffer_info&& f)
   {
-    return static_cast<counted_awaitable_state<read_buffer>*>(this);
+    std::swap(_buf, f._buf);
+    std::swap(_nread, f._nread);
+    return *this;
   }
 };
 
@@ -1198,85 +1470,123 @@ struct read_buffer : public awaitable_state<void> {
 // data to its callback.  So, we need to handle two cases.  One is where the
 // future is created before the data is passed to the callback and the second
 // is where the future is not created first.
-class read_request_t {
-  std::list<counted_ptr<read_buffer>> _buffers;
-  typedef future_t<void, read_buffer> future_read;
-
+class read_request_t
+{
   // We have data to provide.  If there is already a promise that has a future,
   // then use that.  Otherwise, we need to create a new promise for this new
   // data.
   void add_buffer(ssize_t nread, const uv_buf_t* buf)
   {
-    counted_ptr<read_buffer> promise;
-    if (!_buffers.empty()) {
-      promise = _buffers.front();
-      if (promise->_future_acquired) {
-        _buffers.pop_front();
-        promise->set_value(nread, buf);
-        return;
-      }
+    buffer_info info{ buf, nread };
+    if (waiting != nullptr)
+    {
+      auto p = waiting;
+      waiting = nullptr;
+      p->set_value(std::move(info));
     }
-    _buffers.emplace_back(make_counted<read_buffer>());
-    _buffers.back()->set_value(nread, buf);
+    else
+    {
+      buffers_.emplace_back(std::move(info));
+    }
   }
+
+  std::list<buffer_info>        buffers_;
+  awaitable_state<buffer_info>* waiting = nullptr;
 
 public:
   read_request_t() = default;
   // no copy/move
   read_request_t(const read_request_t&) = delete;
   read_request_t(read_request_t&&) = delete;
+  read_request_t& operator=(const read_request_t&) = delete;
+  read_request_t& operator=(read_request_t&&) = default;
+
+  void clear()
+  {
+    buffers_.clear();
+  }
 
   // We may already have a promise with data available so check for that first.
-  future_read read_next()
+  awaitable_state<buffer_info>& read_next(awaitable_state<buffer_info>& awaitable)
   {
-    if (!_buffers.empty()) {
-      auto buffer = _buffers.front();
-      if (!buffer->_future_acquired) {
-        _buffers.pop_front();
-        return future_read{ buffer };
-      }
+    if (!buffers_.empty())
+    {
+      awaitable.set_value(std::move(buffers_.front()));
+      buffers_.pop_front();
     }
-    auto buffer = make_counted<read_buffer>();
-    _buffers.push_back(buffer);
-    return future_read{ buffer };
+    else
+    {
+      assert(waiting == nullptr);
+      waiting = &awaitable;
+    }
+
+    return awaitable;
   }
-  friend int read_start(uv_stream_t* handle, read_request_t* request);
+
+  awaitable_t<buffer_info> read_next()
+  {
+    awaitable_state<buffer_info> buffer;
+    co_return co_await read_next(buffer);
+  }
+
+  // note: read_start does not return a future. All futures are acquired
+  // through read_request_t::read_next
+  inline int read_start(uv_stream_t* handle)
+  {
+    uv_read_stop(handle);
+    clear();
+
+    handle->data = this;
+
+    int res = uv_read_start(
+        handle,
+        [](uv_handle_t* handle, size_t suggested_size, uv_buf_t* buf) {
+          *buf = uv_buf_init(new char[suggested_size], suggested_size);
+        },
+        [](uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf) {
+          auto reader = reinterpret_cast<read_request_t*>(stream->data);
+          reader->add_buffer(nread, buf);
+        });
+
+    return res;
+  }
 };
 
-// note: read_start does not return a future. All futures are acquired through
-// read_request_t::read_next
-inline int read_start(uv_stream_t* handle, read_request_t* request)
-{
-  uv_read_stop(handle);
-  request->_buffers.clear();
-
-  handle->data = request;
-
-  int res = uv_read_start(
-      handle,
-      [](uv_handle_t* handle, size_t suggested_size, uv_buf_t* buf) {
-        *buf = uv_buf_init(new char[suggested_size], suggested_size);
-      },
-      [](uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf) {
-        auto reader = reinterpret_cast<read_request_t*>(stream->data);
-        reader->add_buffer(nread, buf);
-      });
-
-  return res;
-}
-
-inline future_t<std::string> stream_to_string(uv_stream_t* handle)
+inline awaitable_t<std::string> stream_to_string(uv_stream_t* handle)
 {
   read_request_t reader;
   std::string    str;
-  if (read_start(handle, &reader) == 0) {
-    while (1) {
-      auto state = co_await reader.read_next();
-      if (state->_nread <= 0)
+  if (reader.read_start(handle) == 0)
+  {
+    while (1)
+    {
+      awaitable_state<buffer_info> buffer;
+      auto                         state = co_await reader.read_next(buffer);
+      if (state._nread <= 0)
         break;
-      str.append(state->_buf.base, state->_nread);
+      str.append(state._buf.base, state._nread);
     }
   }
   co_return str;
 }
+
+inline auto& uv_queue_work(awaitable_state<int>& awaitable, uv_loop_t* loop, uv_work_t* req, uv_work_cb work_cb)
+{
+  req->data = &awaitable;
+
+  auto ret = ::uv_queue_work(loop, req, work_cb, [](uv_work_t* req, int status) -> void {
+    static_cast<awaitable_state<int>*>(req->data)->set_value(status);
+  });
+
+  if (ret != 0)
+    awaitable.set_value(ret);
+  return awaitable;
+}
+
+inline awaitable_t<int> uv_queue_work(uv_loop_t* loop, uv_work_t* req, uv_work_cb work_cb)
+{
+  awaitable_state<int> state;
+  co_return co_await uv_queue_work(state, loop, req, work_cb);
+}
+
 } // namespace awaituv

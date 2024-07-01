@@ -20,16 +20,16 @@ AlwaysBreakTemplateDeclarations:            true
 BinPackArguments:                           true
 BinPackParameters:                          false
 BraceWrapping:
-  AfterClass:                               false
-  AfterControlStatement:                    false
-  AfterEnum:                                false
+  AfterClass:                               true
+  AfterControlStatement:                    true
+  AfterEnum:                                true
   AfterFunction:                            true
-  AfterNamespace:                           false
-  AfterStruct:                              false
-  AfterUnion:                               false
+  AfterNamespace:                           true
+  AfterStruct:                              true
+  AfterUnion:                               true
   AfterExternBlock:                         true
   BeforeCatch:                              false
-  BeforeElse:                               false
+  BeforeElse:                               true
   IndentBraces:                             false
   SplitEmptyFunction:                       false
   SplitEmptyRecord:                         false
@@ -40,7 +40,7 @@ BreakBeforeInheritanceComma:                false
 BreakBeforeTernaryOperators:                false
 BreakConstructorInitializers:               BeforeColon
 BreakStringLiterals:                        false
-ColumnLimit:                                79
+ColumnLimit:                                119
 CommentPragmas:                             ''
 CompactNamespaces:                          false
 ConstructorInitializerAllOnOneLineOrOnePerLine: false

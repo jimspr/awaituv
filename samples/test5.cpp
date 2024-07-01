@@ -1,6 +1,7 @@
 // Test5.cpp : Defines the entry point for the console application.
 //
 
+#include "utils.h"
 #include <awaituv.h>
 #include <fcntl.h>
 #include <string>
@@ -9,64 +10,82 @@
 using namespace awaituv;
 using namespace std;
 
-future_t<void> start_http_google()
+awaitable_t<void> test_a()
 {
-  uv_tcp_t socket;
-  if (uv_tcp_init(uv_default_loop(), &socket) == 0) {
-    // Use HTTP/1.0 rather than 1.1 so that socket is closed by server when
-    // done sending data. Makes it easier than figuring it out on our end...
-    const char* httpget =
-        "GET / HTTP/1.0\r\n"
-        "Host: www.google.com\r\n"
-        "Cache-Control: max-age=0\r\n"
-        "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8\r\n"
-        "\r\n";
-    const char* host = "www.google.com";
-
-    uv_getaddrinfo_t req;
-    addrinfo_state   addrstate;
-    if (co_await getaddrinfo(addrstate, uv_default_loop(), &req, host, "http",
-                             nullptr) == 0) {
-      uv_connect_t         connectreq;
-      awaitable_state<int> connectstate;
-      if (co_await tcp_connect(connectstate, &connectreq, &socket,
-                               addrstate._addrinfo->ai_addr) == 0) {
-        string_buf_t         buffer{ httpget };
-        ::uv_write_t         writereq;
-        awaitable_state<int> writestate;
-        if (co_await write(writestate, &writereq, connectreq.handle, &buffer,
-                           1) == 0) {
-          read_request_t reader;
-          if (read_start(connectreq.handle, &reader) == 0) {
-            while (1) {
-              auto state = co_await reader.read_next();
-              if (state->_nread <= 0)
-                break;
-              uv_buf_t buf = uv_buf_init(state->_buf.base, state->_nread);
-              fs_t     writereq;
-              awaitable_state<int> writestate;
-              (void)co_await fs_write(writestate, uv_default_loop(), &writereq,
-                                      1 /*stdout*/, &buf, 1, -1);
-            }
-          }
-        }
-      }
-    }
-    awaitable_state<void> closestate;
-    co_await close(closestate, &socket);
-  }
+  auto f1 = start_http_google();
+  auto f2 = start_http_google();
+  co_await future_of_all(f1, f2);
 }
 
-future_t<void> test5()
+awaitable_t<void> test_b()
+{
+  awaitable_t<size_t> futures[2] = { start_http_google(), start_http_google() };
+  auto             fut = future_of_all_range(&futures[0], &futures[2]);
+  auto             results = co_await fut;
+  printf("\n");
+  for (auto& i : results)
+    printf("%zu\n", i);
+}
+
+awaitable_t<void> test_c()
+{
+  std::vector<awaitable_t<size_t>> vec;
+  vec.push_back(start_http_google());
+  vec.push_back(start_http_google());
+  auto fut = future_of_all_range(vec.begin(), vec.end());
+  auto results = co_await fut;
+  printf("\n");
+  for (auto& i : results)
+    printf("%zu\n", i);
+}
+
+awaitable_t<void> test_d()
 {
   auto f1 = start_http_google();
   auto f2 = start_http_google();
   co_await future_of_any(f1, f2);
 }
 
+awaitable_t<void> test_e()
+{
+  auto f1 = uv_fs_open(uv_default_loop(), "e:\\awaituv2\\inc\\awaituv.h", O_RDONLY, 0);
+  auto f2 = uv_fs_open(uv_default_loop(), "e:\\awaituv2\\inc\\awaituv.h", O_RDONLY, 0);
+  co_await future_of_any(f1, f2);
+  int file;
+  if (f1._ready)
+    file = f1._value;
+  else if (f2._ready)
+    file = f2._value;
+  printf("file = %d\n", file);
+}
+
 int main(int argc, char* argv[])
 {
-  test5();
+  // Process command line
+  if (argc != 1)
+  {
+    printf("test5");
+    return -1;
+  }
+
+  printf("test_a--------------------------------------------------\n");
+  test_a();
+  uv_run(uv_default_loop(), UV_RUN_DEFAULT);
+
+  printf("test_b--------------------------------------------------\n");
+  test_b();
+  uv_run(uv_default_loop(), UV_RUN_DEFAULT);
+
+  printf("test_c--------------------------------------------------\n");
+  test_c();
+  uv_run(uv_default_loop(), UV_RUN_DEFAULT);
+
+  printf("test_d--------------------------------------------------\n");
+  test_d();
+  uv_run(uv_default_loop(), UV_RUN_DEFAULT);
+
+  printf("test_e--------------------------------------------------\n");
+  test_e();
   uv_run(uv_default_loop(), UV_RUN_DEFAULT);
 
   uv_loop_close(uv_default_loop());
