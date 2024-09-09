@@ -20,7 +20,7 @@ awaitable_t<void> start_dump_file(const std::string str)
   if (file > 0)
   {
     printf("opened %s\n", str.c_str());
-    (void)co_await uv_fs_open(uv_default_loop(), file);
+    co_await uv_fs_close(uv_default_loop(), file);
   }
 }
 
@@ -59,7 +59,8 @@ int main(int argc, char* argv[])
 
   uv_run(uv_default_loop(), UV_RUN_DEFAULT);
 
-  uv_loop_close(uv_default_loop());
+  auto ret = uv_loop_close(uv_default_loop());
+  assert(ret != UV_EBUSY);
 
   return 0;
 }

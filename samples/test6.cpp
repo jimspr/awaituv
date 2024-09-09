@@ -6,7 +6,7 @@
 using namespace awaituv;
 using namespace std;
 
-awaitable_t<void> test3()
+awaitable_t<void> test6()
 {
   co_return;
 }
@@ -18,9 +18,9 @@ awaitable_t<void> forward(awaitable_t<void> f)
 
 int main(int argc, char* argv[])
 {
-  auto future = test3();
-  //  future = test3();
+  auto future = test6();
+  //  future = test6();
   forward(std::move(future));
-  forward(test3());
+  forward(test6());
   return 0;
 }

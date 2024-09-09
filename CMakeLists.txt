@@ -14,7 +14,7 @@ find_package (CURL REQUIRED)
 link_libraries (${CURL_LIBRARIES} uv)
 elseif ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC")
 SET (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /std:c++latest")
-link_libraries (uv libcurl)
+link_libraries (libcurl uv)
 
 endif ()
 

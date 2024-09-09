@@ -10,8 +10,8 @@
 using namespace awaituv;
 using namespace std;
 
-bool           run_timer = true;
-uv_timer_t     color_timer;
+bool              run_timer = true;
+uv_timer_t        color_timer;
 awaitable_t<void> start_color_changer()
 {
   static string_buf_t normal = "\033[40;37m";
@@ -33,21 +33,20 @@ awaitable_t<void> start_color_changer()
 
   while (run_timer)
   {
-    (void)co_await timerstate.next();
+    co_await timerstate.next();
 
     if (++cnt % 2 == 0)
-      (void)co_await uv_write(reinterpret_cast<uv_stream_t*>(&tty), &normal, 1);
+      co_await uv_write(reinterpret_cast<uv_stream_t*>(&tty), &normal, 1);
     else
-      (void)co_await uv_write(reinterpret_cast<uv_stream_t*>(&tty), &red, 1);
+      co_await uv_write(reinterpret_cast<uv_stream_t*>(&tty), &red, 1);
   }
 
   // reset back to normal
-  (void)co_await uv_write(reinterpret_cast<uv_stream_t*>(&tty), &normal, 1);
+  co_await uv_write(reinterpret_cast<uv_stream_t*>(&tty), &normal, 1);
 
   uv_tty_reset_mode();
-  awaitable_state<void> state;
-  co_await uv_close(state, &tty);
-  co_await uv_close(state, &color_timer); // close handle
+  co_await uv_close(&tty);
+  co_await uv_close(&color_timer); // close handle
 }
 
 void stop_color_changer()
@@ -71,9 +70,9 @@ awaitable_t<void> start_dump_file(const std::string& str)
       if (result <= 0)
         break;
       buffer.len = result;
-      (void)co_await uv_fs_write(uv_default_loop(), 1 /*stdout*/, &buffer, 1, -1);
+      co_await uv_fs_write(uv_default_loop(), 1 /*stdout*/, &buffer, 1, -1);
     }
-    (void)co_await uv_fs_open(uv_default_loop(), file);
+    co_await uv_fs_close(uv_default_loop(), file);
   }
 }
 
@@ -82,7 +81,7 @@ awaitable_t<void> start_hello_world()
   for (int i = 0; i < 1000; ++i)
   {
     string_buf_t buf("\nhello world\n");
-    (void)co_await uv_fs_write(uv_default_loop(), 1 /*stdout*/, &buf, 1, -1);
+    co_await uv_fs_write(uv_default_loop(), 1 /*stdout*/, &buf, 1, -1);
   }
 }
 
@@ -137,7 +136,8 @@ int main(int argc, char* argv[])
     stop_color_changer();
   uv_run(uv_default_loop(), UV_RUN_DEFAULT);
 
-  uv_loop_close(uv_default_loop());
+  auto ret = uv_loop_close(uv_default_loop());
+  assert(ret != UV_EBUSY);
 
   return 0;
 }

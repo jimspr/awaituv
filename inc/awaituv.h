@@ -15,56 +15,39 @@
 namespace awaituv
 {
 
-struct suspend_if
+// libuv's uv_buf_init doesn't take ssize_t. Rather than putting casts everywhere, make an overload.
+uv_buf_t uv_buf_init(char* base, ssize_t len)
 {
-  bool _suspend;
+  return ::uv_buf_init(base, static_cast<unsigned int>(len));
+}
 
-  constexpr bool await_ready() const noexcept
-  {
-    return !_suspend;
-  }
-
-  constexpr void await_suspend(std::coroutine_handle<>) const noexcept {}
-  constexpr void await_resume() const noexcept {}
-};
-
-// awaitable_state_base holds some simple stuff that all awaitables here
-// are based// on.
-struct awaitable_state_base
+// awaitable_common holds some simple stuff that all awaitables are based on.
+struct awaitable_common
 {
-  std::function<void(void)> _on_await = nullptr;
-  std::function<void(void)> _coro = nullptr;
+  std::function<void(void)> _callback = nullptr;
   bool                      _ready = false;
 
   // set_callback is used by multi_awaitable
   void set_callback(std::function<void(void)> cb)
   {
     // Test to make sure nothing else is waiting on this future.
-    assert(((cb == nullptr) || (_coro == nullptr)) && "This awaitable is already being awaited.");
-    _coro = cb;
-  }
-
-  void execute_on_await()
-  {
-    auto on_await = _on_await;
-    _on_await = nullptr;
-    if (on_await != nullptr)
-      on_await();
+    assert(((cb == nullptr) || (_callback == nullptr)) && "This awaitable is already being awaited.");
+    _callback = cb;
   }
 
   void set_value()
   {
     // Set all members first as calling coroutine may reset stuff here.
     _ready = true;
-    auto coro = _coro;
-    _coro = nullptr;
+    auto coro = _callback;
+    _callback = nullptr;
     if (coro != nullptr)
       coro();
   }
 
   void reset()
   {
-    _coro = nullptr;
+    _callback = nullptr;
     _ready = false;
   }
 
@@ -81,18 +64,15 @@ struct awaitable_state_base
 };
 
 /*
-  awaitable_state is used to return an awaitable type from a function
-  that is not itself a coroutine (i.e. it doesn't use
-  co_await/co_return/co_yield) The awaitable_state object is allocated outside
-  of the function and passed in and then returned by reference from the
-  function. This state provides a location for the eventual value to be stored.
-  Returning it from the function allows the function to be directly
-  co_await'ed.
+  awaitable_state is used to return an awaitable type from a function that is not itself a coroutine (i.e. it doesn't
+  use co_await/co_return/co_yield). The awaitable_state object is allocated outside of the function and passed in by
+  reference and then returned by reference from the function. This state provides a location for the eventual value to
+  be stored. Returning it from the function allows the function to be directly co_await'ed.
 */
 template <typename T>
-struct awaitable_state : public awaitable_state_base
+struct awaitable_state : public awaitable_common
 {
-  T _value;
+  T _value{};
 
   awaitable_state() = default;
   // movable, but not copyable
@@ -101,7 +81,7 @@ struct awaitable_state : public awaitable_state_base
   awaitable_state(awaitable_state&& f) = default;
   awaitable_state& operator=(awaitable_state&&) = default;
 
-  using awaitable_state_base::set_value;
+  using awaitable_common::set_value;
   void set_value(const T& t)
   {
     _value = t;
@@ -111,12 +91,12 @@ struct awaitable_state : public awaitable_state_base
   void set_value(T&& t)
   {
     std::swap(_value, t);
-    awaitable_state_base::set_value();
+    awaitable_common::set_value();
   }
 
   void reset()
   {
-    awaitable_state_base::reset();
+    awaitable_common::reset();
     _value = T{};
   }
 
@@ -134,7 +114,7 @@ struct awaitable_state : public awaitable_state_base
 
 // specialization of awaitable_state<void>
 template <>
-struct awaitable_state<void> : public awaitable_state_base
+struct awaitable_state<void> : public awaitable_common
 {
   awaitable_state() = default;
   awaitable_state(awaitable_state&&) = delete;
@@ -144,14 +124,22 @@ struct awaitable_state<void> : public awaitable_state_base
   void await_resume() const {}
 };
 
+/*
+  The awaitable_t class is used to return an awaitable from a function that is itself a coroutine. The
+  awaitable_t provides storage for the eventual value. This allows two things:
+  1) The async operation can start(and finish) without waiting for co_await to be called.
+  2) Avoids requiring the awaitable to ever be co_await'ed. Cleanup still happens correctly. The awaitable
+  is movable and whenever it is moved, it updates the promise to point to itself. There can be only one awaitable for
+  a promise. Because libuv is single threaded, this is dramatically simpler as we don't need to worry about races.
+*/
 template <typename T>
-struct awaitable_t : public awaitable_state_base
+struct awaitable_t : public awaitable_common
 {
   struct promise_type
   {
     T            _value = {};
     bool         _ready = false;
-    awaitable_t* _awaitable = nullptr; // points to one and only future_t
+    awaitable_t* _awaitable = nullptr; // points to one and only awaitable_t
 
     awaitable_t<T> get_return_object()
     {
@@ -182,13 +170,9 @@ struct awaitable_t : public awaitable_state_base
         _awaitable->return_value_helper(std::move(val));
     }
 
-    suspend_if initial_suspend() const
+    std::suspend_never initial_suspend() const noexcept
     {
-      // Suspend if _on_await has something in it.
-      // This suspends the coroutine immediately and won't execute anything in
-      // it until co_await.
-      bool suspend = _awaitable->_on_await != nullptr;
-      return suspend_if{ suspend };
+      return {};
     }
 
     std::suspend_never final_suspend() const noexcept
@@ -237,7 +221,7 @@ struct awaitable_t : public awaitable_state_base
   awaitable_t& operator=(awaitable_t&& f) = delete;
   awaitable_t(awaitable_t&& f) : _promise(f._promise)
   {
-    assert(f._coro == nullptr); // not awaited yet
+    assert(f._callback == nullptr); // not awaited yet
     _ready = f._ready;
     _value = std::move(f._value);
     _promise._awaitable = this;
@@ -256,25 +240,13 @@ struct awaitable_t : public awaitable_state_base
   T             _value = {};
 };
 
-/*
-  The future_t class is used to return an awaitable from a function
-  that is itself a coroutine. The future_t/promise_type both provide
-  potential storage for the eventual value.
-  This allows two things:
-  1) The async operation can start(and finish) without waiting for co_await to
-  be called. 2) Avoids requiring the awaitable to ever be co_await'ed. Cleanup
-  still happens correctly. The awaitable is movable and whenever it is moved,
-  it updates the promise to point to itself. There can be only one awaitable
-  for a promise. Because libuv is single threaded, this is dramatically simpler
-  as we don't need to worry about races.
-*/
 template <>
-struct awaitable_t<void> : public awaitable_state_base
+struct awaitable_t<void> : public awaitable_common
 {
   struct promise_type
   {
     bool         _ready = false;
-    awaitable_t* _awaitable = nullptr; // points to one and only future_t
+    awaitable_t* _awaitable = nullptr; // points to one and only awaitable_t
 
     awaitable_t get_return_object()
     {
@@ -290,13 +262,9 @@ struct awaitable_t<void> : public awaitable_state_base
         _awaitable->return_void();
     }
 
-    suspend_if initial_suspend() const
+    std::suspend_never initial_suspend() const noexcept
     {
-      // Suspend if _on_await has something in it.
-      // This suspends the coroutine immediately and won't execute anything in
-      // it until co_await.
-      bool suspend = _awaitable->_on_await != nullptr;
-      return suspend_if{ suspend };
+      return {};
     }
 
     std::suspend_never final_suspend() const noexcept
@@ -326,9 +294,9 @@ struct awaitable_t<void> : public awaitable_state_base
   awaitable_t& operator=(const awaitable_t&) = delete;
   awaitable_t& operator=(awaitable_t&&) = delete;
   awaitable_t(const awaitable_t&) = delete;
-  awaitable_t(awaitable_t&& f) : _promise(f._promise)
+  awaitable_t(awaitable_t&& f) noexcept : _promise(f._promise)
   {
-    assert(f._coro == nullptr); // not awaited yet
+    assert(f._callback == nullptr); // not awaited yet
     _ready = f._ready;
     _promise._awaitable = this;
   }
@@ -340,6 +308,11 @@ struct awaitable_t<void> : public awaitable_state_base
     // away. This can happen when creating multiple awaitables but only waiting
     // for one to complete (e.g. future_of_any).
     _promise._awaitable = nullptr;
+  }
+
+  std::coroutine_handle<promise_type> handle()
+  {
+    return std::coroutine_handle<promise_type>::from_promise(_promise);
   }
 
   promise_type& _promise;
@@ -414,8 +387,8 @@ struct multi_awaitable_state : public awaitable_state<void>
   void await_suspend(std::coroutine_handle<> resume_cb)
   {
     // Test to make sure nothing else is waiting on this future.
-    assert(((resume_cb == nullptr) || (_coro == nullptr)) && "This awaitable is already being awaited.");
-    _coro = resume_cb;
+    assert(((resume_cb == nullptr) || (_callback == nullptr)) && "This awaitable is already being awaited.");
+    _callback = resume_cb;
 
     // Make any completion of a future call any_completed
     std::function<void(void)> func = std::bind(&multi_awaitable_state::any_completed, this);
@@ -478,7 +451,7 @@ struct iterator_awaitable_state : public awaitable_state<Iterator>
 
 // returns the index of the iterator that succeeded
 //template <typename Iterator>
-//future_t<Iterator, iterator_awaitable_state<Iterator>> future_of_any_range(Iterator begin, Iterator end)
+//awaitable_t<Iterator, iterator_awaitable_state<Iterator>> future_of_any_range(Iterator begin, Iterator end)
 //{
 //  promise_t<Iterator, iterator_awaitable_state<Iterator>> promise(begin, end);
 //  return promise.get_future();
@@ -584,35 +557,26 @@ struct is_uv_handle_t<T, decltype((void)T::data, 0), decltype((void)T::loop, 0),
 template <typename T>
 auto unref(T* handle, typename std::enable_if<is_uv_handle_t<T>::value>::type* dummy = nullptr)
 {
-  uv_unref(reinterpret_cast<uv_handle_t*>(handle));
+  ::uv_unref(reinterpret_cast<uv_handle_t*>(handle));
 }
 
 template <typename T>
 auto ref(T* handle, typename std::enable_if<is_uv_handle_t<T>::value>::type* dummy = nullptr)
 {
-  uv_ref(reinterpret_cast<uv_handle_t*>(handle));
+  ::uv_ref(reinterpret_cast<uv_handle_t*>(handle));
 }
 
-/* switch_to_loop_thread must be called on a thread other than the loop thread
-   or this function will hang. */
-inline awaitable_t<void> switch_to_loop_thread(uv_async_t* req, uv_loop_t* loop)
+template <typename value_t, typename req_t>
+void set_value_from_req(req_t* req)
 {
-  awaitable_state<void> awaitable;
-
-  req->data = &awaitable;
-  /* We have to run this lazily (i.e. after suspension) or the async could
-     complete before the caller starts awaiting, which would NOT actually
-     result in resuming on the loop thread. */
-  awaitable._on_await = [=]() { uv_async_send(req); };
-  co_return co_await awaitable;
+  static_cast<awaitable_state<value_t>*>(req->data)->set_value(static_cast<value_t>(req->result));
 }
 
-//
 inline auto& uv_shutdown(awaitable_state<int>& awaitable, uv_shutdown_t* req, uv_stream_t* handle)
 {
   req->data = &awaitable;
 
-  auto ret = uv_shutdown(req, handle, [](uv_shutdown_t* req, int status) -> void {
+  auto ret = ::uv_shutdown(req, handle, [](uv_shutdown_t* req, int status) -> void {
     static_cast<awaitable_state<int>*>(req->data)->set_value(status);
   });
 
@@ -639,8 +603,8 @@ inline auto& uv_fs_open(awaitable_state<uv_file>& awaitable,
 {
   req->data = &awaitable;
 
-  auto ret = uv_fs_open(loop, req, path, flags, mode, [](uv_fs_t* req) -> void {
-    static_cast<awaitable_state<uv_file>*>(req->data)->set_value(req->result);
+  auto ret = ::uv_fs_open(loop, req, path, flags, mode, [](uv_fs_t* req) -> void {
+    set_value_from_req<uv_file>(req);
   });
 
   if (ret != 0)
@@ -655,12 +619,12 @@ inline awaitable_t<uv_file> uv_fs_open(uv_loop_t* loop, const char* path, int fl
   co_return co_await uv_fs_open(state, loop, &req, path, flags, mode);
 }
 
-inline auto& uv_fs_open(awaitable_state<int>& awaitable, uv_loop_t* loop, uv_fs_t* req, uv_file file)
+inline auto& uv_fs_close(awaitable_state<int>& awaitable, uv_loop_t* loop, uv_fs_t* req, uv_file file)
 {
   req->data = &awaitable;
 
-  auto ret = uv_fs_close(loop, req, file, [](uv_fs_t* req) -> void {
-    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
+  auto ret = ::uv_fs_close(loop, req, file, [](uv_fs_t* req) -> void {
+    set_value_from_req<int>(req);
   });
 
   if (ret != 0)
@@ -668,11 +632,11 @@ inline auto& uv_fs_open(awaitable_state<int>& awaitable, uv_loop_t* loop, uv_fs_
   return awaitable;
 }
 
-inline awaitable_t<int> uv_fs_open(uv_loop_t* loop, uv_file file)
+inline awaitable_t<int> uv_fs_close(uv_loop_t* loop, uv_file file)
 {
   fs_t                 req;
   awaitable_state<int> state;
-  co_return co_await uv_fs_open(state, loop, &req, file);
+  co_return co_await uv_fs_close(state, loop, &req, file);
 }
 
 inline auto& uv_fs_read(awaitable_state<int>& awaitable,
@@ -685,8 +649,8 @@ inline auto& uv_fs_read(awaitable_state<int>& awaitable,
 {
   req->data = &awaitable;
 
-  auto ret = uv_fs_read(loop, req, file, bufs, nbufs, offset, [](uv_fs_t* req) -> void {
-    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
+  auto ret = ::uv_fs_read(loop, req, file, bufs, nbufs, offset, [](uv_fs_t* req) -> void {
+    set_value_from_req<int>(req);
   });
 
   if (ret != 0)
@@ -705,12 +669,12 @@ inline awaitable_t<int> uv_fs_read(uv_loop_t*     loop,
   co_return co_await uv_fs_read(state, loop, &req, file, bufs, nbufs, offset);
 }
 
-inline auto& fs_unlink(awaitable_state<int>& awaitable, uv_loop_t* loop, uv_fs_t* req, const char* path)
+inline auto& uv_fs_unlink(awaitable_state<int>& awaitable, uv_loop_t* loop, uv_fs_t* req, const char* path)
 {
   req->data = &awaitable;
 
-  auto ret = uv_fs_unlink(loop, req, path, [](uv_fs_t* req) -> void {
-    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
+  auto ret = ::uv_fs_unlink(loop, req, path, [](uv_fs_t* req) -> void {
+    set_value_from_req<int>(req);
   });
 
   if (ret != 0)
@@ -718,11 +682,11 @@ inline auto& fs_unlink(awaitable_state<int>& awaitable, uv_loop_t* loop, uv_fs_t
   return awaitable;
 }
 
-inline awaitable_t<int> fs_unlink(uv_loop_t* loop, const char* path)
+inline awaitable_t<int> uv_fs_unlink(uv_loop_t* loop, const char* path)
 {
   fs_t                 req;
   awaitable_state<int> state;
-  co_return co_await fs_unlink(state, loop, &req, path);
+  co_return co_await uv_fs_unlink(state, loop, &req, path);
 }
 
 inline auto& uv_fs_write(awaitable_state<int>& awaitable,
@@ -735,8 +699,8 @@ inline auto& uv_fs_write(awaitable_state<int>& awaitable,
 {
   req->data = &awaitable;
 
-  auto ret = uv_fs_write(loop, req, file, bufs, nbufs, offset, [](uv_fs_t* req) -> void {
-    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
+  auto ret = ::uv_fs_write(loop, req, file, bufs, nbufs, offset, [](uv_fs_t* req) -> void {
+    set_value_from_req<int>(req);
   });
 
   if (ret != 0)
@@ -764,8 +728,8 @@ inline auto& uv_fs_copyfile(awaitable_state<int>& awaitable,
 {
   req->data = &awaitable;
 
-  auto ret = uv_fs_copyfile(loop, req, path, new_path, flags, [](uv_fs_t* req) -> void {
-    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
+  auto ret = ::uv_fs_copyfile(loop, req, path, new_path, flags, [](uv_fs_t* req) -> void {
+    set_value_from_req<int>(req);
   });
 
   if (ret != 0)
@@ -784,8 +748,8 @@ inline auto& uv_fs_mkdir(awaitable_state<int>& awaitable, uv_loop_t* loop, uv_fs
 {
   req->data = &awaitable;
 
-  auto ret = uv_fs_mkdir(loop, req, path, mode, [](uv_fs_t* req) -> void {
-    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
+  auto ret = ::uv_fs_mkdir(loop, req, path, mode, [](uv_fs_t* req) -> void {
+    set_value_from_req<int>(req);
   });
 
   if (ret != 0)
@@ -804,9 +768,7 @@ inline auto& uv_fs_mkdtemp(awaitable_state<int>& awaitable, uv_loop_t* loop, uv_
 {
   req->data = &awaitable;
 
-  auto ret = uv_fs_mkdtemp(loop, req, tpl, [](uv_fs_t* req) -> void {
-    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
-  });
+  auto ret = ::uv_fs_mkdtemp(loop, req, tpl, [](uv_fs_t* req) -> void { set_value_from_req<int>(req); });
 
   if (ret != 0)
     awaitable.set_value(ret);
@@ -824,9 +786,7 @@ inline auto& uv_fs_rmdir(awaitable_state<int>& awaitable, uv_loop_t* loop, uv_fs
 {
   req->data = &awaitable;
 
-  auto ret = uv_fs_rmdir(loop, req, path, [](uv_fs_t* req) -> void {
-    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
-  });
+  auto ret = ::uv_fs_rmdir(loop, req, path, [](uv_fs_t* req) -> void { set_value_from_req<int>(req); });
 
   if (ret != 0)
     awaitable.set_value(ret);
@@ -846,9 +806,7 @@ inline auto& uv_fs_stat(awaitable_state<int>& awaitable, uv_loop_t* loop, uv_fs_
 {
   req->data = &awaitable;
 
-  auto ret = uv_fs_stat(loop, req, path, [](uv_fs_t* req) -> void {
-    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
-  });
+  auto ret = ::uv_fs_stat(loop, req, path, [](uv_fs_t* req) -> void { set_value_from_req<int>(req); });
 
   if (ret != 0)
     awaitable.set_value(ret);
@@ -866,9 +824,7 @@ inline auto& uv_fs_fstat(awaitable_state<int>& awaitable, uv_loop_t* loop, uv_fs
 {
   req->data = &awaitable;
 
-  auto ret = uv_fs_fstat(loop, req, file, [](uv_fs_t* req) -> void {
-    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
-  });
+  auto ret = ::uv_fs_fstat(loop, req, file, [](uv_fs_t* req) -> void { set_value_from_req<int>(req); });
 
   if (ret != 0)
     awaitable.set_value(ret);
@@ -890,9 +846,7 @@ inline auto& uv_fs_rename(awaitable_state<int>& awaitable,
 {
   req->data = &awaitable;
 
-  auto ret = uv_fs_rename(loop, req, path, new_path, [](uv_fs_t* req) -> void {
-    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
-  });
+  auto ret = ::uv_fs_rename(loop, req, path, new_path, [](uv_fs_t* req) -> void { set_value_from_req<int>(req); });
 
   if (ret != 0)
     awaitable.set_value(ret);
@@ -910,9 +864,7 @@ inline auto& uv_fs_fsync(awaitable_state<int>& awaitable, uv_loop_t* loop, uv_fs
 {
   req->data = &awaitable;
 
-  auto ret = uv_fs_fsync(loop, req, file, [](uv_fs_t* req) -> void {
-    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
-  });
+  auto ret = ::uv_fs_fsync(loop, req, file, [](uv_fs_t* req) -> void { set_value_from_req<int>(req); });
 
   if (ret != 0)
     awaitable.set_value(ret);
@@ -930,9 +882,7 @@ inline auto& uv_fs_fdatasync(awaitable_state<int>& awaitable, uv_loop_t* loop, u
 {
   req->data = &awaitable;
 
-  auto ret = uv_fs_fdatasync(loop, req, file, [](uv_fs_t* req) -> void {
-    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
-  });
+  auto ret = ::uv_fs_fdatasync(loop, req, file, [](uv_fs_t* req) -> void { set_value_from_req<int>(req); });
 
   if (ret != 0)
     awaitable.set_value(ret);
@@ -954,9 +904,7 @@ inline auto& uv_fs_ftruncate(awaitable_state<int>& awaitable,
 {
   req->data = &awaitable;
 
-  auto ret = uv_fs_ftruncate(loop, req, file, offset, [](uv_fs_t* req) -> void {
-    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
-  });
+  auto ret = ::uv_fs_ftruncate(loop, req, file, offset, [](uv_fs_t* req) -> void { set_value_from_req<int>(req); });
 
   if (ret != 0)
     awaitable.set_value(ret);
@@ -980,9 +928,7 @@ inline auto& uv_fs_sendfile(awaitable_state<int>& awaitable,
 {
   req->data = &awaitable;
 
-  auto ret = uv_fs_sendfile(loop, req, out_fd, in_fd, in_offset, length, [](uv_fs_t* req) -> void {
-    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
-  });
+  auto ret = ::uv_fs_sendfile(loop, req, out_fd, in_fd, in_offset, length, [](uv_fs_t* req) -> void { set_value_from_req<int>(req); });
 
   if (ret != 0)
     awaitable.set_value(ret);
@@ -1004,9 +950,7 @@ inline auto& uv_fs_access(awaitable_state<int>& awaitable, uv_loop_t* loop, uv_f
 {
   req->data = &awaitable;
 
-  auto ret = uv_fs_access(loop, req, path, mode, [](uv_fs_t* req) -> void {
-    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
-  });
+  auto ret = ::uv_fs_access(loop, req, path, mode, [](uv_fs_t* req) -> void { set_value_from_req<int>(req); });
 
   if (ret != 0)
     awaitable.set_value(ret);
@@ -1024,9 +968,7 @@ inline auto& uv_fs_chmod(awaitable_state<int>& awaitable, uv_loop_t* loop, uv_fs
 {
   req->data = &awaitable;
 
-  auto ret = uv_fs_chmod(loop, req, path, mode, [](uv_fs_t* req) -> void {
-    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
-  });
+  auto ret = ::uv_fs_chmod(loop, req, path, mode, [](uv_fs_t* req) -> void { set_value_from_req<int>(req); });
 
   if (ret != 0)
     awaitable.set_value(ret);
@@ -1049,9 +991,7 @@ inline auto& uv_fs_utime(awaitable_state<int>& awaitable,
 {
   req->data = &awaitable;
 
-  auto ret = uv_fs_utime(loop, req, path, atime, mtime, [](uv_fs_t* req) -> void {
-    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
-  });
+  auto ret = ::uv_fs_utime(loop, req, path, atime, mtime, [](uv_fs_t* req) -> void { set_value_from_req<int>(req); });
 
   if (ret != 0)
     awaitable.set_value(ret);
@@ -1074,9 +1014,7 @@ inline auto& uv_fs_futime(awaitable_state<int>& awaitable,
 {
   req->data = &awaitable;
 
-  auto ret = uv_fs_futime(loop, req, file, atime, mtime, [](uv_fs_t* req) -> void {
-    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
-  });
+  auto ret = ::uv_fs_futime(loop, req, file, atime, mtime, [](uv_fs_t* req) -> void { set_value_from_req<int>(req); });
 
   if (ret != 0)
     awaitable.set_value(ret);
@@ -1094,9 +1032,7 @@ inline auto& uv_fs_lstat(awaitable_state<int>& awaitable, uv_loop_t* loop, uv_fs
 {
   req->data = &awaitable;
 
-  auto ret = uv_fs_lstat(loop, req, path, [](uv_fs_t* req) -> void {
-    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
-  });
+  auto ret = ::uv_fs_lstat(loop, req, path, [](uv_fs_t* req) -> void { set_value_from_req<int>(req); });
 
   if (ret != 0)
     awaitable.set_value(ret);
@@ -1118,9 +1054,7 @@ inline auto& uv_fs_link(awaitable_state<int>& awaitable,
 {
   req->data = &awaitable;
 
-  auto ret = uv_fs_link(loop, req, path, new_path, [](uv_fs_t* req) -> void {
-    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
-  });
+  auto ret = ::uv_fs_link(loop, req, path, new_path, [](uv_fs_t* req) -> void { set_value_from_req<int>(req); });
 
   if (ret != 0)
     awaitable.set_value(ret);
@@ -1143,9 +1077,7 @@ inline auto& uv_fs_symlink(awaitable_state<int>& awaitable,
 {
   req->data = &awaitable;
 
-  auto ret = uv_fs_symlink(loop, req, path, new_path, flags, [](uv_fs_t* req) -> void {
-    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
-  });
+  auto ret = ::uv_fs_symlink(loop, req, path, new_path, flags, [](uv_fs_t* req) -> void { set_value_from_req<int>(req); });
 
   if (ret != 0)
     awaitable.set_value(ret);
@@ -1163,9 +1095,7 @@ inline auto& uv_fs_readlink(awaitable_state<int>& awaitable, uv_loop_t* loop, uv
 {
   req->data = &awaitable;
 
-  auto ret = uv_fs_readlink(loop, req, path, [](uv_fs_t* req) -> void {
-    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
-  });
+  auto ret = ::uv_fs_readlink(loop, req, path, [](uv_fs_t* req) -> void { set_value_from_req<int>(req); });
 
   if (ret != 0)
     awaitable.set_value(ret);
@@ -1183,9 +1113,7 @@ inline auto& uv_fs_realpath(awaitable_state<int>& awaitable, uv_loop_t* loop, uv
 {
   req->data = &awaitable;
 
-  auto ret = uv_fs_realpath(loop, req, path, [](uv_fs_t* req) -> void {
-    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
-  });
+  auto ret = ::uv_fs_realpath(loop, req, path, [](uv_fs_t* req) -> void { set_value_from_req<int>(req); });
 
   if (ret != 0)
     awaitable.set_value(ret);
@@ -1203,9 +1131,7 @@ inline auto& uv_fs_fchmod(awaitable_state<int>& awaitable, uv_loop_t* loop, uv_f
 {
   req->data = &awaitable;
 
-  auto ret = uv_fs_fchmod(loop, req, file, mode, [](uv_fs_t* req) -> void {
-    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
-  });
+  auto ret = ::uv_fs_fchmod(loop, req, file, mode, [](uv_fs_t* req) -> void { set_value_from_req<int>(req); });
 
   if (ret != 0)
     awaitable.set_value(ret);
@@ -1228,9 +1154,7 @@ inline auto& uv_fs_chown(awaitable_state<int>& awaitable,
 {
   req->data = &awaitable;
 
-  auto ret = uv_fs_chown(loop, req, path, uid, gid, [](uv_fs_t* req) -> void {
-    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
-  });
+  auto ret = ::uv_fs_chown(loop, req, path, uid, gid, [](uv_fs_t* req) -> void { set_value_from_req<int>(req); });
 
   if (ret != 0)
     awaitable.set_value(ret);
@@ -1253,9 +1177,7 @@ inline auto& uv_fs_fchown(awaitable_state<int>& awaitable,
 {
   req->data = &awaitable;
 
-  auto ret = uv_fs_fchown(loop, req, file, uid, gid, [](uv_fs_t* req) -> void {
-    static_cast<awaitable_state<int>*>(req->data)->set_value(req->result);
-  });
+  auto ret = ::uv_fs_fchown(loop, req, file, uid, gid, [](uv_fs_t* req) -> void { set_value_from_req<int>(req); });
 
   if (ret != 0)
     awaitable.set_value(ret);
@@ -1273,7 +1195,7 @@ inline auto& uv_listen(awaitable_state<int>& awaitable, uv_stream_t* stream, int
 {
   stream->data = &awaitable;
 
-  auto ret = uv_listen(stream, backlog, [](uv_stream_t* stream, int status) -> void {
+  auto ret = ::uv_listen(stream, backlog, [](uv_stream_t* stream, int status) -> void {
     static_cast<awaitable_state<int>*>(stream->data)->set_value(status);
   });
 
@@ -1297,7 +1219,7 @@ inline auto& uv_write(awaitable_state<int>& awaitable,
 {
   req->data = &awaitable;
 
-  auto ret = uv_write(req, handle, bufs, nbufs, [](uv_write_t* req, int status) -> void {
+  auto ret = ::uv_write(req, handle, bufs, nbufs, [](uv_write_t* req, int status) -> void {
     static_cast<awaitable_state<int>*>(req->data)->set_value(status);
   });
 
@@ -1449,13 +1371,13 @@ struct buffer_info
   // movable, but not copyable
   buffer_info(const buffer_info&) = delete;
   buffer_info& operator=(const buffer_info&) = delete;
-  buffer_info(buffer_info&& f)
+  buffer_info(buffer_info&& f) noexcept
   {
     _buf = f._buf;
     memset(&f._buf, 0, sizeof(uv_buf_t));
     _nread = f._nread;
   }
-  buffer_info& operator=(buffer_info&& f)
+  buffer_info& operator=(buffer_info&& f) noexcept
   {
     std::swap(_buf, f._buf);
     std::swap(_nread, f._nread);
@@ -1533,12 +1455,12 @@ public:
   // through read_request_t::read_next
   inline int read_start(uv_stream_t* handle)
   {
-    uv_read_stop(handle);
+    ::uv_read_stop(handle);
     clear();
 
     handle->data = this;
 
-    int res = uv_read_start(
+    int res = ::uv_read_start(
         handle,
         [](uv_handle_t* handle, size_t suggested_size, uv_buf_t* buf) {
           *buf = uv_buf_init(new char[suggested_size], suggested_size);

@@ -20,8 +20,8 @@ awaitable_t<void> test_a()
 awaitable_t<void> test_b()
 {
   awaitable_t<size_t> futures[2] = { start_http_google(), start_http_google() };
-  auto             fut = future_of_all_range(&futures[0], &futures[2]);
-  auto             results = co_await fut;
+  auto                fut = future_of_all_range(&futures[0], &futures[2]);
+  auto                results = co_await fut;
   printf("\n");
   for (auto& i : results)
     printf("%zu\n", i);
@@ -51,7 +51,7 @@ awaitable_t<void> test_e()
   auto f1 = uv_fs_open(uv_default_loop(), "e:\\awaituv2\\inc\\awaituv.h", O_RDONLY, 0);
   auto f2 = uv_fs_open(uv_default_loop(), "e:\\awaituv2\\inc\\awaituv.h", O_RDONLY, 0);
   co_await future_of_any(f1, f2);
-  int file;
+  int file = -1;
   if (f1._ready)
     file = f1._value;
   else if (f2._ready)
@@ -88,7 +88,8 @@ int main(int argc, char* argv[])
   test_e();
   uv_run(uv_default_loop(), UV_RUN_DEFAULT);
 
-  uv_loop_close(uv_default_loop());
+  auto ret = uv_loop_close(uv_default_loop());
+  assert(ret != UV_EBUSY);
 
   return 0;
 }

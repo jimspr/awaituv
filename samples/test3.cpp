@@ -29,17 +29,17 @@ awaitable_t<void> test3(curl_requester_t& requester)
   {
     sprintf(buffer, "http_code: %ld\n", result.http_code);
     string_buf_t buf{ buffer, strlen(buffer) };
-    (void)co_await uv_fs_write(uv_default_loop(), 1 /*stdout*/, &buf, 1, -1);
+    co_await uv_fs_write(uv_default_loop(), 1 /*stdout*/, &buf, 1, -1);
 
     auto&        str = result.str;
     string_buf_t buf2{ str.c_str(), str.size() };
-    (void)co_await uv_fs_write(uv_default_loop(), 1 /*stdout*/, &buf2, 1, -1);
+    co_await uv_fs_write(uv_default_loop(), 1 /*stdout*/, &buf2, 1, -1);
   }
   else
   {
     sprintf(buffer, "failed %d\n", result.curl_code);
     string_buf_t buf{ buffer, strlen(buffer) };
-    (void)co_await uv_fs_write(uv_default_loop(), 1 /*stdout*/, &buf, 1, -1);
+    co_await uv_fs_write(uv_default_loop(), 1 /*stdout*/, &buf, 1, -1);
   }
 
   curl_slist_free_all(headers);
@@ -58,9 +58,12 @@ int main(int argc, char* argv[])
 
     uv_run(uv_default_loop(), UV_RUN_DEFAULT);
   }
+  // Run loop again after ~curl_requester_t runs in order to clean up any remaining handles.
+  uv_run(uv_default_loop(), UV_RUN_DEFAULT);
 
   curl_global_cleanup();
-  uv_loop_close(uv_default_loop());
+  auto ret = uv_loop_close(uv_default_loop());
+  assert(ret != UV_EBUSY);
 
   return 0;
 }

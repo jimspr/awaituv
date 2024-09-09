@@ -39,8 +39,8 @@ inline awaituv::awaitable_t<size_t> start_http_google()
               if (info._nread <= 0)
                 break;
               count += info._nread;
-              uv_buf_t buf = uv_buf_init(info._buf.base, info._nread);
-              (void)co_await awaituv::uv_fs_write(uv_default_loop(), 1 /*stdout*/, &buf, 1, -1);
+              uv_buf_t buf = awaituv::uv_buf_init(info._buf.base, info._nread);
+              co_await awaituv::uv_fs_write(uv_default_loop(), 1 /*stdout*/, &buf, 1, -1);
             }
           }
         }
